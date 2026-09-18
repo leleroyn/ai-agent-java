@@ -1,0 +1,20 @@
+target/
+.env
+agent-workspace/
+dist/
+*.log
+.idea/
+*.iml
+.vscode/
+
+# OS / 编辑器临时
+.DS_Store
+Thumbs.db
+*.swp
+# Python / JVM 产物
+__pycache__/
+*.pyc
+*.class
+# 运行临时
+nohup.out
+hs_err_pid*.log

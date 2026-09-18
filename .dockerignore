@@ -1,0 +1,35 @@
+# 构建上下文里唯一需要的文件是 target/ 下的 fat jar，其余全部排除。
+#
+# 关键项：.env 含真实数据库密码与内网地址，绝不能进入构建上下文（一旦上下文被
+# 打包、缓存或传给 CI 制品，就是凭据泄露）。这里显式挡住，而不是依赖"没写 COPY .env"。
+
+# --- 凭据与本地配置 ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- 构建产物：只放行 fat jar ---
+target/*
+!target/*.jar
+target/*.jar.original
+
+# --- 运行期目录（容器内用 volume，不需要进镜像）---
+agent-workspace
+agent-skills
+
+# --- 与镜像无关的仓库内容 ---
+.git
+.gitignore
+.idea
+.vscode
+docs
+scripts
+tmp-test
+logs
+*.log
+*.md
+Dockerfile
+docker-compose.yml
+.dockerignore

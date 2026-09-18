@@ -1,0 +1,61 @@
+services:
+  mysql:
+    image: docker.m.daocloud.io/library/mysql:8.4
+    container_name: agent-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootdev}
+      MYSQL_DATABASE: ${DB_NAME:-agent}
+      MYSQL_USER: ${DB_USER:-agent}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-agent}
+    ports:
+      - "${DB_PORT:-3306}:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      # Runs only on an empty data dir. The app also applies schema.sql on boot.
+      - ./src/main/resources/db/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_general_ci
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-p${MYSQL_ROOT_PASSWORD:-rootdev}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  app:
+    # 镜像由 scripts/docker-build.sh 产出（带版本号 + latest + commit 三个 tag）。
+    # 部署指定版本：APP_IMAGE=ai-agent-java:1.0.0 docker compose up -d
+    image: ${APP_IMAGE:-ai-agent-java:latest}
+    container_name: agent-app
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_NAME: ${DB_NAME:-agent}
+      DB_USER: ${DB_USER:-agent}
+      DB_PASSWORD: ${DB_PASSWORD:-agent}
+      # The model host must be reachable from inside the container.
+      # Verified: this container can reach 192.168.1.250:8009.
+      AGENT_BASE_URL: ${AGENT_BASE_URL:-http://192.168.1.250:8009/v1}
+      AGENT_MODEL_NAME: ${AGENT_MODEL_NAME:-qwen}
+      AGENT_PERMISSION_MODE: ${AGENT_PERMISSION_MODE:-BYPASS}
+      AGENT_MAX_CONCURRENT: ${AGENT_MAX_CONCURRENT:-4}
+      # 技能目录：宿主机 ./agent-skills 只读挂到 /skills，改 SKILL.md 下一个任务即生效。
+      AGENT_SKILLS_DIR: /skills
+      # 容器内统一用绝对路径：每任务实际跑在 /workspace/<taskId>。
+      # 镜像里已带 HEALTHCHECK（curl /health，start_period=60s），这里不重复定义以免两处不一致。
+      AGENT_WORKING_DIR: /workspace
+    ports:
+      - "${APP_PORT:-8080}:8080"
+    volumes:
+      # agent 的文件工具与 shell 就在此工作；镜像内 /workspace 已 chown 给 uid 10001，
+      # 首次挂载会继承该权限，named volume 场景无需额外 chown。
+      - agent-workspace:/workspace
+      # 只读：技能是部署配置，容器内不应该能改它（已实测 touch 会 Read-only file system）。
+      - ${SKILLS_HOST_DIR:-./agent-skills}:/skills:ro
+    restart: unless-stopped
+
+volumes:
+  mysql-data:
+  agent-workspace:
