@@ -34,11 +34,13 @@ agent:
     base-url: ${AGENT_BASE_URL:http://192.168.1.250:8009/v1}
     api-key: ${AGENT_API_KEY:local}
     name: ${AGENT_MODEL_NAME:qwen}
-    # MEASURED: this endpoint returns HTTP 400 "failed to initialize samplers:
-    # failed to parse grammar" when `tools` and `response_format:json_schema` are
-    # sent together. Keep false so AgentScope emits the structured result through
-    # its synthetic generate_response tool instead.
-    native-structured-output-with-tools: false
+    # 端点相关开关：
+    #  - llama.cpp(:8009) 把 tools 与 response_format:json_schema 同时发会 400
+    #    "failed to parse grammar"，必须 false（AgentScope 改走合成 generate_response 工具）。
+    #  - minicpm / vLLM 类端点接受 tools+json_schema（实测 200），设 true 走原生
+    #    response_format，结构化输出更可靠；此时若为 false，模型不调合成工具会直接大白话作答导致 NO_RESULT。
+    # 默认 false（兼容 llama.cpp）；换 minicpm 部署置 AGENT_NATIVE_SO_WITH_TOOLS=true。
+    native-structured-output-with-tools: ${AGENT_NATIVE_SO_WITH_TOOLS:false}
     native-structured-output: ${AGENT_NATIVE_SO:true}
     # MEASURED: with thinking enabled the model spends the whole token budget on
     # reasoning_content and returns empty content (finish_reason=length).
