@@ -6,6 +6,9 @@
 #   IMAGE_REPO=myreg.local:5000/ai-agent-java bash scripts/docker-build.sh
 #   PUSH=1 IMAGE_REPO=myreg.local:5000/ai-agent-java bash scripts/docker-build.sh
 #   NO_CACHE=1 bash scripts/docker-build.sh         # apt 层也重建
+#   OVERLAY=1 SKIP_BUILD=1 bash scripts/docker-build.sh   # 快路径:在已有镜像上只换 jar, 秒级
+#     适合只改 Java 代码的迭代。基座默认取 ${IMAGE_REPO}:latest(可用 OVERLAY_BASE 指定)，
+#     需先做过一次完整构建。每次会往上叠一层 jar，定期做一次完整构建以收敛层数/刷新标签。
 #
 # 版本号取自 pom.xml 的 <version>（跳过 <parent> 块）。git commit 取不到时记 unknown，
 # 不阻断构建——本项目当前尚未初始化 git，这是预期情况。
@@ -16,6 +19,7 @@ IMAGE_REPO="${IMAGE_REPO:-ai-agent-java}"
 PUSH="${PUSH:-0}"
 NO_CACHE="${NO_CACHE:-0}"
 SKIP_BUILD="${SKIP_BUILD:-0}"
+OVERLAY="${OVERLAY:-0}"
 APT_MIRROR="${APT_MIRROR:-mirrors.aliyun.com}"
 BASE_IMAGE="${BASE_IMAGE:-docker.m.daocloud.io/library/eclipse-temurin:17-jre-noble}"
 
@@ -85,8 +89,33 @@ if [ "$GIT_COMMIT" != "unknown" ] && [[ "$GIT_COMMIT" != *-dirty ]]; then
 fi
 [ "$NO_CACHE" = "1" ] && BUILD_ARGS+=(--no-cache)
 
-echo "==> docker build ${IMAGE_REPO}:${VERSION}"
-docker build "${BUILD_ARGS[@]}" .
+if [ "$OVERLAY" = "1" ]; then
+  # 快路径：FROM 已有镜像 + 只 COPY 新 jar，跳过 apt（本机 apt 层缓存不保留，完整构建每次 ~6min）。
+  OVERLAY_BASE="${OVERLAY_BASE:-${IMAGE_REPO}:latest}"
+  if ! docker image inspect "$OVERLAY_BASE" >/dev/null 2>&1; then
+    echo "ERROR: OVERLAY=1 需要已存在的基座镜像 $OVERLAY_BASE；先跑一次完整构建（去掉 OVERLAY）。" >&2
+    exit 1
+  fi
+  OV="$(mktemp "./.overlay.XXXXXX.Dockerfile")"
+  cat > "$OV" <<EOF
+FROM ${OVERLAY_BASE}
+COPY ${JAR} /app/app.jar
+LABEL org.opencontainers.image.title="ai-agent-java" \\
+      org.opencontainers.image.version="${VERSION}" \\
+      org.opencontainers.image.revision="${GIT_COMMIT}" \\
+      org.opencontainers.image.created="${BUILD_TIME}"
+EOF
+  OV_TAGS=(-t "${IMAGE_REPO}:${VERSION}" -t "${IMAGE_REPO}:latest")
+  if [ "$GIT_COMMIT" != "unknown" ] && [[ "$GIT_COMMIT" != *-dirty ]]; then
+    OV_TAGS+=(-t "${IMAGE_REPO}:${VERSION}-${GIT_COMMIT}")
+  fi
+  echo "==> docker build (OVERLAY 快路径, 跳过 apt) ${IMAGE_REPO}:${VERSION}  base=${OVERLAY_BASE}"
+  docker build -f "$OV" "${OV_TAGS[@]}" .
+  rm -f "$OV"
+else
+  echo "==> docker build ${IMAGE_REPO}:${VERSION}"
+  docker build "${BUILD_ARGS[@]}" .
+fi
 
 echo
 echo "==> 镜像："
