@@ -37,12 +37,20 @@ public class ModelFactory {
     public OpenAIChatModel build() {
         AgentProperties.Model m = props.getModel();
 
+        // 按结构化输出策略解析原生开关；TWO_PHASE/OFF 下 schema 不传给 agent，withTools 无关，置 false 保险。
+        boolean nativeWithTools;
+        switch (m.getStructuredOutputMode()) {
+            case NATIVE -> nativeWithTools = true;
+            case TOOL, TWO_PHASE, OFF -> nativeWithTools = false;
+            default -> nativeWithTools = m.isNativeStructuredOutputWithTools(); // AUTO: 旧行为
+        }
+
         OpenAIChatModel.Builder builder = OpenAIChatModel.builder()
                 .baseUrl(m.getBaseUrl())
                 .apiKey(m.getApiKey())
                 .modelName(m.getName())
                 .nativeStructuredOutput(m.isNativeStructuredOutput())
-                .nativeStructuredOutputWithTools(m.isNativeStructuredOutputWithTools());
+                .nativeStructuredOutputWithTools(nativeWithTools);
 
         if (m.getContextWindowSize() != null && m.getContextWindowSize() > 0) {
             builder.contextWindowSize(m.getContextWindowSize());

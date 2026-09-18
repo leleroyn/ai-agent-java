@@ -42,17 +42,20 @@ public class AgentTaskRunner {
     private final ToolkitFactory toolkitFactory;
     private final TaskWorkspaceFactory workspaceFactory;
     private final SkillRepositoryFactory skillRepositoryFactory;
+    private final StructuredOutputConverter structuredConverter;
     private final ObjectMapper mapper;
 
     public AgentTaskRunner(AgentProperties props, ModelFactory modelFactory,
                            ToolkitFactory toolkitFactory, TaskWorkspaceFactory workspaceFactory,
                            SkillRepositoryFactory skillRepositoryFactory,
+                           StructuredOutputConverter structuredConverter,
                            ObjectMapper mapper) {
         this.props = props;
         this.modelFactory = modelFactory;
         this.toolkitFactory = toolkitFactory;
         this.workspaceFactory = workspaceFactory;
         this.skillRepositoryFactory = skillRepositoryFactory;
+        this.structuredConverter = structuredConverter;
         this.mapper = mapper;
     }
 
@@ -94,7 +97,15 @@ public class AgentTaskRunner {
 
         List<Msg> messages = List.of(new UserMessage(prompt));
 
-        Mono<Msg> call = schema == null
+        AgentProperties.StructuredOutputMode mode = props.getModel().getStructuredOutputMode();
+        // TWO_PHASE / OFF：第一趟不带 schema 跑，让 understand_image 等工具能正常调用
+        // （带 schema 时 llama.cpp 会因 response_format 语法约束抑制工具调用）。TWO_PHASE 再补
+        // 一次不带 tools 的文本→JSON 结构化调用；OFF 只兜底解析回复文本里的 JSON。
+        boolean freeFormFirst = schema != null
+                && (mode == AgentProperties.StructuredOutputMode.TWO_PHASE
+                        || mode == AgentProperties.StructuredOutputMode.OFF);
+
+        Mono<Msg> call = (schema == null || freeFormFirst)
                 ? agent.call(messages, ctx)
                 : agent.call(messages, schema, ctx);
 
@@ -104,7 +115,12 @@ public class AgentTaskRunner {
         }
 
         String text = safeText(reply);
-        JsonNode result = extractStructured(reply, schema);
+        JsonNode result;
+        if (mode == AgentProperties.StructuredOutputMode.TWO_PHASE && schema != null) {
+            result = structuredConverter.toStructured(text, schema);
+        } else {
+            result = extractStructured(reply, schema);
+        }
         if (schema != null && result == null) {
             throw new AgentException(ErrorCodes.NO_RESULT,
                     "agent finished but produced no value matching outputSchema", false);

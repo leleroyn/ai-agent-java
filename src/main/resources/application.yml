@@ -42,6 +42,10 @@ agent:
     # 默认 false（兼容 llama.cpp）；换 minicpm 部署置 AGENT_NATIVE_SO_WITH_TOOLS=true。
     native-structured-output-with-tools: ${AGENT_NATIVE_SO_WITH_TOOLS:false}
     native-structured-output: ${AGENT_NATIVE_SO:true}
+    # 结构化输出策略：auto|native|tool|two_phase|off（大小写/下划线不敏感）。默认 auto=旧行为。
+    # llama.cpp+minicpm 下带图片的 outputSchema 任务用 two_phase（先跑工具、再转 JSON），
+    # 单靠 native/tool 都无法同时满足文本+schema 与图片+schema。
+    structured-output-mode: ${AGENT_STRUCTURED_OUTPUT:auto}
     # MEASURED: with thinking enabled the model spends the whole token budget on
     # reasoning_content and returns empty content (finish_reason=length).
     # "none" disables it. Set blank/low only if you also raise max-tokens a lot.

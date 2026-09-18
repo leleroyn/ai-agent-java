@@ -45,6 +45,23 @@ public class AgentProperties {
         return limits;
     }
 
+    /**
+     * 结构化输出（outputSchema）产出策略。不同端点/模型对 tools+response_format 的
+     * 支持度不同，用这一个开关适配，换模型只改配置不改代码。
+     * <ul>
+     *   <li>{@code AUTO}：保持旧行为，由 nativeStructuredOutput(WithTools) 两个布尔决定（向后兼容）。</li>
+     *   <li>{@code NATIVE}：单趟，带 tools 时直接发 response_format:json_schema（仅适合支持
+     *       interleaving 的端点，如 vLLM/OpenAI；llama.cpp 会因此抑制工具调用）。</li>
+     *   <li>{@code TOOL}：单趟，走 AgentScope 合成 generate_response 工具。</li>
+     *   <li>{@code TWO_PHASE}：先不带 schema 跑工具拿自由文本，再用不带 tools+response_format
+     *       的第二次调用把文本转 JSON。最稳，llama.cpp+minicpm 下图片+schema 也能对。</li>
+     *   <li>{@code OFF}：不强制，仅兜底解析回复文本里的 JSON。</li>
+     * </ul>
+     */
+    public enum StructuredOutputMode {
+        AUTO, NATIVE, TOOL, TWO_PHASE, OFF
+    }
+
     /** LLM endpoint. Defaults match the locally verified llama.cpp OpenAI-compatible server. */
     public static class Model {
         private String baseUrl = "http://192.168.1.250:8009/v1";
@@ -57,6 +74,9 @@ public class AgentProperties {
          */
         private boolean nativeStructuredOutputWithTools = false;
         private boolean nativeStructuredOutput = true;
+
+        /** 结构化输出策略，默认 AUTO（=旧行为）。 */
+        private StructuredOutputMode structuredOutputMode = StructuredOutputMode.AUTO;
 
         /** "none" disables reasoning; see application.yml for the measured rationale. Blank = unset. */
         private String reasoningEffort = "none";
@@ -95,6 +115,14 @@ public class AgentProperties {
 
         public void setNativeStructuredOutputWithTools(boolean nativeStructuredOutputWithTools) {
             this.nativeStructuredOutputWithTools = nativeStructuredOutputWithTools;
+        }
+
+        public StructuredOutputMode getStructuredOutputMode() {
+            return structuredOutputMode;
+        }
+
+        public void setStructuredOutputMode(StructuredOutputMode structuredOutputMode) {
+            this.structuredOutputMode = structuredOutputMode;
         }
 
         public boolean isNativeStructuredOutput() {
