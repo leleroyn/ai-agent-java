@@ -1,10 +1,6 @@
 package com.example.agent.agent;
 
 import com.example.agent.config.AgentProperties;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.URI;
@@ -15,35 +11,29 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.Comparator;
-import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Set;
-import java.util.TreeSet;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 /**
- * 大/多页扫描 PDF 的抽取流水线：下载 → 数页 → 逐页栅格化（poppler pdftoppm）→ 每 N 页一批交给
- * 视觉模型（{@code agent.vision}）抽取调用方指定的关键信息 → 合并去重 → 只回字段值 + 页码。
+ * 文档（PDF）理解流水线，定位是 <b>「PDF 版的图片理解」</b>：调用方给一个<b>自由问题</b>
+ * （要 VL 对文档做什么）+ 一个 PDF 来源（URL 或任务沙箱本地路径）+ 可选页范围，服务端把这一批页
+ * 栅格化后连同问题一次性交给视觉模型（{@code agent.vision}），直接返回视觉模型的<b>自然语言回答</b>。
  *
- * <p><b>与主模型解耦</b>：PDF/页面图像只发到 VL 端点，主模型只拿到最终紧凑 JSON。
+ * <p><b>与 {@link VisionClient} 解耦同一原则</b>：页面图像只发到 VL 端点，主模型只拿到文字。
  *
- * <p><b>不做 OCR、不做自动断点续传</b>（按方案取舍）：扫描页本就是图像，VL 直接读；页数不设硬上限，
- * 由上层任务级超时兜底。单批 VL 调用有独立超时；某批失败记入 failed_pages 继续，不整体失败。
+ * <p><b>刻意保持薄</b>：不在服务端做结构化、字段合并、reduce 汇总、格式化——这些交给主模型。
+ * 因此本工具不做分批并发：一次只处理一批页（上限 {@code agent.pdf.pages-per-call}，且不超过
+ * {@code agent.vision.max-images}）。需要处理更多页时，调用方用 {@code page_range} 分批调用，
+ * 并在主模型自己的上下文里汇总。这与 {@code understand_image} 一次若干图、多轮自由问答的用法一致。
  *
- * <p>栅格化用 {@code pdftoppm}（镜像内 poppler-utils），产物写任务沙箱、用完即删；并发上限
- * {@code agent.pdf.concurrency}，因此同时驻留磁盘的页面图受控。
+ * <p>栅格化用 {@code pdftoppm}（镜像内 poppler-utils），产物写任务沙箱、用完即删；本地来源的
+ * 源文件绝不删除。
  */
 @Component
 public class PdfService {
@@ -53,15 +43,11 @@ public class PdfService {
     private static final Pattern TRAIL_NUM = Pattern.compile("-(\\d+)\\.[A-Za-z0-9]+$");
 
     private final AgentProperties props;
-    private final ObjectMapper mapper;
     private final VisionClient visionClient;
     private final HttpClient http;
 
-    public PdfService(AgentProperties props,
-                      @Qualifier("agentScopeObjectMapper") ObjectMapper mapper,
-                      VisionClient visionClient) {
+    public PdfService(AgentProperties props, VisionClient visionClient) {
         this.props = props;
-        this.mapper = mapper;
         this.visionClient = visionClient;
         this.http = HttpClient.newBuilder()
                 .connectTimeout(java.time.Duration.ofSeconds(20))
@@ -70,36 +56,32 @@ public class PdfService {
     }
 
     /**
-     * @param pdfUrl    PDF 的 http/https 地址
-     * @param fieldsRaw 用户要抽取的关键信息，用 ; 换行 、 , 分隔
-     * @param pageRange 可选页范围 "a-b"/"a"/"a-"；null 或空=全部页
-     * @param taskDir   任务沙箱（下载与栅格化临时文件写这里，随任务清理）
-     * @return 紧凑结果 JSON 文本；出错返回 {@code "Error: ..."}
+     * @param pdfSource PDF 的 http/https 地址，或任务沙箱内的本地文件路径
+     * @param question  要对文档做的自由问题/指令；留空则默认逐页转录/说明内容
+     * @param pageRange 可选页范围 {@code "a-b"} / {@code "a"} / {@code "a-"}；null=全部页
+     * @param taskDir   任务沙箱
+     * @return 视觉模型的自然语言回答（已要求引用内容时标注绝对页码）；出错或超页时返回可读说明
      */
-    public String extract(String pdfUrl, String fieldsRaw, String pageRange, Path taskDir) {
+    public String understand(String pdfSource, String question, String pageRange, Path taskDir) {
         AgentProperties.Pdfs cfg = props.getPdfs();
         if (!props.getVision().isEnabled()) {
             return "Error: 视觉功能未启用（agent.vision.enabled=false），无法理解 PDF。";
         }
-        List<String> fields = parseFields(fieldsRaw);
-        if (fields.isEmpty()) {
-            return "Error: fields 为空，请说明要抽取哪些关键信息。";
-        }
         Path pdf = null;
         boolean downloaded = false;
         try {
-            if (isHttpUrl(pdfUrl)) {
-                URI uri = validateUrl(pdfUrl, cfg);
+            if (isHttpUrl(pdfSource)) {
+                URI uri = validateUrl(pdfSource, cfg);
                 pdf = download(uri, taskDir, cfg.getMaxDownloadBytes());
                 downloaded = true;
             } else {
                 // 本地文档：只允许任务沙箱内的文件，绝不删除源文件（可能是调用方预置的）。
-                Path local = SandboxPaths.resolveWithin(taskDir, pdfUrl);
+                Path local = SandboxPaths.resolveWithin(taskDir, pdfSource);
                 if (local == null) {
-                    return "Error: 本地文档路径必须在任务工作目录内，已拒绝越界访问：" + pdfUrl;
+                    return "Error: 本地文档路径必须在任务工作目录内，已拒绝越界访问：" + pdfSource;
                 }
                 if (!Files.isRegularFile(local)) {
-                    return "Error: 本地文档文件不存在：" + pdfUrl + "（相对本任务工作目录）。";
+                    return "Error: 本地文档文件不存在：" + pdfSource + "（相对本任务工作目录）。";
                 }
                 pdf = local;
             }
@@ -107,61 +89,32 @@ public class PdfService {
             int[] range = resolveRange(pageRange, total);
             int start = range[0];
             int end = range[1];
-            log.info("pdf extract url={} pages={} range={}-{} fields={}",
-                    pdfUrl, total, start, end, fields.size());
-            final Path pdfFile = pdf;
-
-            int k = cfg.getPagesPerCall();
-            int pool = cfg.getConcurrency();
-            // 合并累加器：field -> (value -> 命中页集合)
-            LinkedHashMap<String, LinkedHashMap<String, TreeSet<Integer>>> acc = new LinkedHashMap<>();
-            TreeSet<Integer> failedPages = new TreeSet<>();
-            ExecutorService exec = Executors.newFixedThreadPool(pool);
-            List<Future<BatchOut>> futures = new ArrayList<>();
-            List<int[]> ranges = new ArrayList<>();
-            int batchId = 0;
-            try {
-                for (int a = start; a <= end; a += k) {
-                    int b = Math.min(a + k - 1, end);
-                    final int fa = a;
-                    final int fb = b;
-                    final int bid = batchId++;
-                    ranges.add(new int[]{fa, fb});
-                    futures.add(exec.submit(() -> runBatch(pdfFile, fa, fb, bid, fields, total, taskDir)));
-                }
-                for (int i = 0; i < futures.size(); i++) {
-                    int[] rr = ranges.get(i);
-                    BatchOut out;
-                    try {
-                        out = futures.get(i).get();
-                    } catch (Exception e) {
-                        log.warn("pdf batch {}-{} failed: {}", rr[0], rr[1], e.toString());
-                        for (int p = rr[0]; p <= rr[1]; p++) {
-                            failedPages.add(p);
-                        }
-                        continue;
-                    }
-                    if (out.error) {
-                        for (int p = rr[0]; p <= rr[1]; p++) {
-                            failedPages.add(p);
-                        }
-                        continue;
-                    }
-                    for (Hit h : out.hits) {
-                        if (h.value == null || h.value.isBlank()) {
-                            continue;
-                        }
-                        acc.computeIfAbsent(h.field, x -> new LinkedHashMap<>())
-                                .computeIfAbsent(h.value.trim(), x -> new TreeSet<>())
-                                .addAll(h.pages);
-                    }
-                }
-            } finally {
-                exec.shutdownNow();
+            int pages = end - start + 1;
+            int cap = Math.min(cfg.getPagesPerCall(), props.getVision().getMaxImages());
+            if (cap < 1) {
+                cap = 1;
             }
-            return buildResult(fields, acc, failedPages, total, start, end);
+            log.info("pdf understand src={} total={} range={}-{} pages={} cap={}",
+                    pdfSource, total, start, end, pages, cap);
+
+            // 不在服务端分批/reduce：超上限就让主模型自己分批调、自己汇总。
+            if (pages > cap) {
+                int nextEnd = start + cap - 1;
+                return "本文档共 " + total + " 页，本次请求第 " + start + "-" + end + " 页（" + pages
+                        + " 页）超过单次上限 " + cap + " 页。请用 page_range 分批调用本工具，例如先 "
+                        + "\"" + start + "-" + nextEnd + "\"、再 \"" + (nextEnd + 1) + "-…\"，"
+                        + "把各批返回的自然语言结果在你自己的最终回答里汇总。";
+            }
+
+            List<String> urls = rasterize(pdf, start, end, 0, taskDir);
+            if (urls.isEmpty()) {
+                return "Error: 栅格化第 " + start + "-" + end + " 页失败（可能不是有效 PDF）。";
+            }
+            String q = (question == null || question.isBlank())
+                    ? "请逐页转录并说明这一页的标题与主要内容。" : question.trim();
+            return visionClient.extractFromDataUrls(urls, buildQaPrompt(start, end, total, q));
         } catch (Exception e) {
-            log.error("pdf extract failed url={}", pdfUrl, e);
+            log.error("pdf understand failed src={}", pdfSource, e);
             return "Error: 处理 PDF 失败：" + e.getClass().getSimpleName() + ": " + e.getMessage();
         } finally {
             cleanupTempImages(taskDir);
@@ -175,44 +128,12 @@ public class PdfService {
         }
     }
 
-    /** 单批：栅格化 [a..b] 页 → VL 抽取 → 解析 hits。任一步失败即 error=true。 */
-    private BatchOut runBatch(Path pdf, int a, int b, int batchId,
-                              List<String> fields, int total, Path taskDir) {
-        List<String> dataUrls;
-        try {
-            dataUrls = rasterize(pdf, a, b, batchId, taskDir);
-        } catch (Exception e) {
-            log.warn("rasterize batch {}-{} failed: {}", a, b, e.toString());
-            return BatchOut.failed();
-        }
-        if (dataUrls.isEmpty()) {
-            return BatchOut.failed();
-        }
-        String answer = visionClient.extractFromDataUrls(dataUrls, buildPrompt(a, b, fields));
-        if (answer.startsWith("Error:")) {
-            log.warn("VL batch {}-{} returned error: {}", a, b, answer.substring(0, Math.min(160, answer.length())));
-            return BatchOut.failed();
-        }
-        List<Hit> hits = parseHits(answer);
-        if (hits == null) {
-            log.warn("VL batch {}-{} answer not parseable as JSON", a, b);
-            return BatchOut.failed();
-        }
-        return BatchOut.ok(hits);
-    }
-
-    private String buildPrompt(int a, int b, List<String> fields) {
-        StringBuilder sb = new StringBuilder();
-        sb.append("这是同一份文档的第 ").append(a).append(" 到 ").append(b).append(" 页，")
-                .append("按顺序第 1 张图=第 ").append(a).append(" 页，第 2 张图=第 ").append(a + 1)
-                .append(" 页，依此类推。\n")
-                .append("只依据图片内容，为下面每个字段找出它的值以及出现的页码（用上面标注的绝对页码）。")
-                .append("同一字段可能在多页出现，请都列出页码。图中找不到该字段则 value 用 null。\n")
-                .append("不要编造，不要解释，只输出一个 JSON 对象，不要代码围栏。需要抽取的字段：\n")
-                .append(String.join("\n", fields)).append("\n\n")
-                .append("输出格式（严格）：\n")
-                .append("{\"hits\":[{\"field\":\"字段名\",\"value\":\"值或null\",\"pages\":[页码数字]}]}");
-        return sb.toString();
+    /** 自由问答提示词：标注绝对页码，要求引用内容时带页码、不编造。 */
+    private String buildQaPrompt(int start, int end, int total, String question) {
+        return "这是同一份文档的第 " + start + " 到第 " + end + " 页（全文共 " + total
+                + " 页中的这一段）。按顺序：第 1 张图=第 " + start + " 页，第 2 张图=第 " + (start + 1)
+                + " 页，依此类推。\n只依据这些图片内容作答，不要编造；凡是引用了文档中的具体内容，"
+                + "请在后面标注它出现的绝对页码（用上面标好的页码）。\n要求：" + question;
     }
 
     /** 栅格化 [a..b] 页为 JPEG data URL（按页升序），用完即删临时文件。 */
@@ -263,7 +184,7 @@ public class PdfService {
         List<String> urls = new ArrayList<>(files.size());
         for (Path f : files) {
             byte[] bytes = Files.readAllBytes(f);
-            urls.add("data:image/jpeg;base64," + Base64.getEncoder().encodeToString(bytes));
+            urls.add("data:image/jpeg;base64," + java.util.Base64.getEncoder().encodeToString(bytes));
             Files.deleteIfExists(f);
         }
         return urls;
@@ -381,155 +302,6 @@ public class PdfService {
         return new int[]{start, end};
     }
 
-    /** 宽松解析 VL 返回的 JSON：取首个平衡的 {..} 或 [..]。解析失败返回 null。 */
-    private List<Hit> parseHits(String text) {
-        String json = extractJson(text);
-        if (json == null) {
-            return null;
-        }
-        try {
-            JsonNode root = mapper.readTree(json);
-            JsonNode hits = root.isArray() ? root : root.path("hits");
-            if (!hits.isArray()) {
-                return null;
-            }
-            List<Hit> list = new ArrayList<>();
-            for (JsonNode h : hits) {
-                String field = textOrNull(h.path("field"));
-                if (field == null || field.isBlank()) {
-                    continue;
-                }
-                String value = textOrNull(h.path("value"));
-                List<Integer> pages = new ArrayList<>();
-                JsonNode p = h.path("pages");
-                if (p.isArray()) {
-                    for (JsonNode pn : p) {
-                        if (pn.isNumber()) {
-                            pages.add(pn.asInt());
-                        } else if (pn.isTextual()) {
-                            try {
-                                pages.add(Integer.parseInt(pn.asText().trim()));
-                            } catch (NumberFormatException ignored) {
-                                // 非数字页码忽略
-                            }
-                        }
-                    }
-                } else if (p.isNumber()) {
-                    pages.add(p.asInt());
-                }
-                list.add(new Hit(field.trim(), value, pages));
-            }
-            return list;
-        } catch (Exception e) {
-            return null;
-        }
-    }
-
-    /** 从可能夹带解释的文本里抠出第一段平衡的 JSON 对象/数组。 */
-    private static String extractJson(String text) {
-        if (text == null) {
-            return null;
-        }
-        int obj = text.indexOf('{');
-        int arr = text.indexOf('[');
-        int begin;
-        char open;
-        char close;
-        if (obj < 0 && arr < 0) {
-            return null;
-        }
-        if (arr < 0 || (obj >= 0 && obj < arr)) {
-            begin = obj;
-            open = '{';
-            close = '}';
-        } else {
-            begin = arr;
-            open = '[';
-            close = ']';
-        }
-        int depth = 0;
-        boolean inStr = false;
-        boolean esc = false;
-        for (int i = begin; i < text.length(); i++) {
-            char c = text.charAt(i);
-            if (inStr) {
-                if (esc) {
-                    esc = false;
-                } else if (c == '\\') {
-                    esc = true;
-                } else if (c == '"') {
-                    inStr = false;
-                }
-                continue;
-            }
-            if (c == '"') {
-                inStr = true;
-            } else if (c == open) {
-                depth++;
-            } else if (c == close) {
-                depth--;
-                if (depth == 0) {
-                    return text.substring(begin, i + 1);
-                }
-            }
-        }
-        return null;
-    }
-
-    private String buildResult(List<String> fields,
-                               LinkedHashMap<String, LinkedHashMap<String, TreeSet<Integer>>> acc,
-                               TreeSet<Integer> failedPages, int total, int start, int end) throws Exception {
-        ObjectNode root = mapper.createObjectNode();
-        root.put("status", failedPages.isEmpty() ? "complete" : "partial");
-        root.put("total_pages", total);
-        ArrayNode processed = root.putArray("pages_processed");
-        processed.add(start);
-        processed.add(end);
-
-        ArrayNode results = root.putArray("results");
-        Set<String> emitted = new LinkedHashSet<>();
-        for (String field : fields) {
-            LinkedHashMap<String, TreeSet<Integer>> byValue = acc.get(field);
-            emitted.add(field);
-            if (byValue == null || byValue.isEmpty()) {
-                ObjectNode r = results.addObject();
-                r.put("field", field);
-                r.putNull("value");
-                r.putArray("pages");
-                continue;
-            }
-            for (var e : byValue.entrySet()) {
-                ObjectNode r = results.addObject();
-                r.put("field", field);
-                r.put("value", e.getKey());
-                ArrayNode pages = r.putArray("pages");
-                for (int p : e.getValue()) {
-                    pages.add(p);
-                }
-            }
-        }
-        // 模型可能返回了未在 fields 里、但确实抽到的字段，一并附上以免丢信息。
-        for (var e : acc.entrySet()) {
-            if (emitted.contains(e.getKey())) {
-                continue;
-            }
-            for (var ve : e.getValue().entrySet()) {
-                ObjectNode r = results.addObject();
-                r.put("field", e.getKey());
-                r.put("value", ve.getKey());
-                ArrayNode pages = r.putArray("pages");
-                for (int p : ve.getValue()) {
-                    pages.add(p);
-                }
-            }
-        }
-        ArrayNode failed = root.putArray("failed_pages");
-        for (int p : failedPages) {
-            failed.add(p);
-        }
-        return mapper.writeValueAsString(root);
-    }
-
     /** 是否 http/https URL（否则视为沙箱本地路径）。 */
     private static boolean isHttpUrl(String s) {
         if (s == null) {
@@ -537,19 +309,6 @@ public class PdfService {
         }
         String t = s.trim().toLowerCase();
         return t.startsWith("http://") || t.startsWith("https://");
-    }
-
-    private static List<String> parseFields(String raw) {
-        LinkedHashSet<String> set = new LinkedHashSet<>();
-        if (raw != null) {
-            for (String part : raw.split("[;；,，、\\n\\r]+")) {
-                String f = part.trim();
-                if (!f.isEmpty()) {
-                    set.add(f);
-                }
-            }
-        }
-        return new ArrayList<>(set);
     }
 
     /** 删除残留的页面临时图（只删我们生成的 pg*.jpg；下载来的源 PDF 由调用处按模式决定删不删）。 */
@@ -574,53 +333,11 @@ public class PdfService {
         }
     }
 
-    private static String textOrNull(JsonNode n) {
-        if (n == null || n.isMissingNode() || n.isNull()) {
-            return null;
-        }
-        if (n.isTextual()) {
-            return n.asText();
-        }
-        return n.asText();
-    }
-
     private static String snippet(String s) {
         if (s == null) {
             return "";
         }
         s = s.replaceAll("\\s+", " ").trim();
         return s.length() <= 200 ? s : s.substring(0, 200) + "…";
-    }
-
-    /** 单字段命中。 */
-    private static final class Hit {
-        final String field;
-        final String value;
-        final List<Integer> pages;
-
-        Hit(String field, String value, List<Integer> pages) {
-            this.field = field;
-            this.value = value;
-            this.pages = pages;
-        }
-    }
-
-    /** 单批输出。 */
-    private static final class BatchOut {
-        final List<Hit> hits;
-        final boolean error;
-
-        private BatchOut(List<Hit> hits, boolean error) {
-            this.hits = hits;
-            this.error = error;
-        }
-
-        static BatchOut ok(List<Hit> hits) {
-            return new BatchOut(hits, false);
-        }
-
-        static BatchOut failed() {
-            return new BatchOut(List.of(), true);
-        }
     }
 }

@@ -668,18 +668,19 @@ public class AgentProperties {
     }
 
     /**
-     * 文档理解工具（{@code understand_document}）的配置，面向大/多页扫描 PDF。
+     * 文档理解工具（{@code understand_document}）的配置。它是「PDF 版的图片理解」：一次把
+     * 一批页栅格化后连同自由问题交给视觉模型（{@link Vision}），返回自然语言。
      *
-     * <p>与 {@link Vision} 配合：PDF 逐页栅格化后，每 {@code pagesPerCall} 页一批交给视觉模型
-     * （并发 {@code concurrency}），抽取调用方指定的关键信息并回页码。页数不设硬上限，
-     * 由任务级超时兑底。
+     * <p>不在服务端做分批/reduce：{@code pagesPerCall} 是单次调用最多处理的页数，超出时工具
+     * 会提示调用方用 {@code page_range} 分批、自行汇总（汇总交给主模型）。
      */
     public static class Pdfs {
         private boolean enabled = true;
-        /** 每次 VL 调用吽多少页。必须≤视觉模型单次图数上限（{@code agent.vision.max-images}）。 */
+        /**
+         * 单次 {@code understand_document} 调用最多处理多少页。实际生效上限为
+         * {@code min(本值, agent.vision.max-images)}；超过则返回分批提示，不在服务端自动分批。
+         */
         private int pagesPerCall = 6;
-        /** 并行批数上限。 */
-        private int concurrency = 4;
         /** 栅格化最长边像素（控 token）；0=不缩放。pdftoppm -scale-to。 */
         private int maxImageDimension = 1568;
         /** 栅格化 JPEG 质量。 */
@@ -707,14 +708,6 @@ public class AgentProperties {
 
         public void setPagesPerCall(int pagesPerCall) {
             this.pagesPerCall = Math.max(1, pagesPerCall);
-        }
-
-        public int getConcurrency() {
-            return concurrency;
-        }
-
-        public void setConcurrency(int concurrency) {
-            this.concurrency = Math.max(1, concurrency);
         }
 
         public int getMaxImageDimension() {

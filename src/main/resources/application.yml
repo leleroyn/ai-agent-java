@@ -89,18 +89,16 @@ agent:
       and cause a timeout. After one understand_image call, produce the final answer from what it
       returned.
       If the instruction mentions a document or contains a document/PDF URL (http(s)://....pdf),
-      For PDFs you have two correct options. (1) understand_document: call it with the PDF URL (or a
-      local path in your working directory) and the fields you need; it reads every page server-side and
-      returns each field's value and pages — best for whole-document structured extraction. (2) For a
-      small document that you want to ask open-ended questions about, rasterize it into image FILES
-      inside your working directory (e.g. pdftoppm -png -f 1 -l 3 doc.pdf page) and pass those local
-      image paths to understand_image. Rasterizing to files and understanding them this way is fine —
-      the page images go only to the vision model, never into your context.
-      What you must NEVER do: print the document's content or text to stdout, read-file the document or
-      an image into the conversation, or pipe pdftotext/pdfgrep output into the transcript — a raw text
-      dump of a large PDF floods your context, and on a scanned PDF it returns nothing useful. Files on
-      disk are fine; content dumped into the transcript is not. Whichever option you use, do it once and
-      answer from the result.
+      If the instruction mentions a document or contains a PDF URL (http(s)://....pdf), understand it
+      with understand_document — the PDF version of understand_image: pass the PDF URL (or a local path
+      in your working directory), a free-form question (what to extract / summarize / compare; leave it
+      empty to transcribe the pages), and optionally a page range; it rasterizes those pages and asks the
+      vision model, returning natural language with page numbers. Page images go only to the vision model,
+      never into your context. It handles a bounded number of pages per call; for a large document, call
+      it repeatedly with page_range (e.g. "1-6", "7-12") and combine the results in your final answer.
+      Do NOT print the document's text to stdout, read-file it or an image into the conversation, or pipe
+      pdftotext/pdfgrep output into the transcript — a raw dump floods your context and on a scanned PDF
+      returns nothing useful. Files on disk are fine; content dumped into the transcript is not.
       When you have enough information, produce exactly the requested result and stop.
       Never ask a question: there is nobody to answer it.
       Skills override the rule above, in two cases. If the task text already contains loaded
@@ -141,14 +139,13 @@ agent:
     # Backpressure: refuse new submissions beyond this many still-queued tasks. 0 disables.
     max-queued-tasks: ${AGENT_MAX_QUEUED_TASKS:1000}
 
-  # 文档理解工具（understand_document）：大/多页扫描 PDF 逐页栅格化后分批交给视觉模型抽取关键信息。
-  # 视觉端点复用上方 agent.vision；图片字节不进主模型上下文。页数不设硬上限，由任务级超时兜底。
+  # 文档理解工具（understand_document）：「PDF 版的图片理解」。一次把一批页栅格化后连同自由问题
+  # 交给视觉模型（复用 agent.vision），返回自然语言（引用内容带页码）；图片字节不进主模型上下文。
+  # 不在服务端分批/reduce：页数超过 pages-per-call 时工具会提示用 page_range 分批、由主模型自行汇总。
   pdf:
     enabled: ${AGENT_PDF_ENABLED:true}
-    # 每次 VL 调用喂多少页；必须≤agent.vision.max-images。
+    # 单次调用最多处理多少页；实际上限 = min(本值, agent.vision.max-images)。
     pages-per-call: ${AGENT_PDF_PAGES_PER_CALL:6}
-    # 并行批数上限。
-    concurrency: ${AGENT_PDF_CONCURRENCY:4}
     # 栅格化最长边像素（控 token；0=不缩放）。pdftoppm -scale-to。
     max-image-dimension: ${AGENT_PDF_MAX_DIM:1568}
     jpeg-quality: ${AGENT_PDF_JPEG_QUALITY:85}
