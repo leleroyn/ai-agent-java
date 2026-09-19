@@ -198,14 +198,22 @@ public class PdfService {
     private List<String> rasterize(Path pdf, int a, int b, int batchId, Path taskDir) throws Exception {
         AgentProperties.Pdfs cfg = props.getPdfs();
         String prefix = taskDir.resolve("pg" + batchId).toString();
-        List<String> cmd = new ArrayList<>(List.of(
-                "pdftoppm", "-jpeg", "-jpegopt", "quality=" + cfg.getJpegQuality(),
-                "-f", String.valueOf(a), "-l", String.valueOf(b),
-                pdf.toString(), prefix));
+        // 参数顺序必须正确：pdftoppm 对用法错误会直接打 usage 并以退出码 99 退出。
+        // -scale-to / -jpegopt 都是带值的选项，不能把它们和自己的值拆开，也不能插到别的选项中间。
+        List<String> cmd = new ArrayList<>(List.of("pdftoppm"));
         if (cfg.getMaxImageDimension() > 0) {
-            cmd.add(3, "-scale-to");
-            cmd.add(4, String.valueOf(cfg.getMaxImageDimension()));
+            cmd.add("-scale-to");
+            cmd.add(String.valueOf(cfg.getMaxImageDimension()));
         }
+        cmd.add("-jpeg");
+        cmd.add("-jpegopt");
+        cmd.add("quality=" + cfg.getJpegQuality());
+        cmd.add("-f");
+        cmd.add(String.valueOf(a));
+        cmd.add("-l");
+        cmd.add(String.valueOf(b));
+        cmd.add(pdf.toString());
+        cmd.add(prefix);
         ProcessBuilder pb = new ProcessBuilder(cmd);
         pb.redirectErrorStream(true);
         Process proc = pb.start();

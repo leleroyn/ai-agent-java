@@ -21,3 +21,6 @@ hs_err_pid*.log
 
 # docker-build.sh OVERLAY 临时文件
 .overlay.*.Dockerfile
+
+# 临时测试产物（生成 PDF、栅格化试跑图），不入库
+tmp-pdftest/
