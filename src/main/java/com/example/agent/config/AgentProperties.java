@@ -11,6 +11,7 @@ public class AgentProperties {
 
     private final Model model = new Model();
     private final Vision vision = new Vision();
+    private final Pdfs pdfs = new Pdfs();
     private final Runner runner = new Runner();
     private final Execution execution = new Execution();
     private final Tools tools = new Tools();
@@ -23,6 +24,10 @@ public class AgentProperties {
 
     public Vision getVision() {
         return vision;
+    }
+
+    public Pdfs getPdfs() {
+        return pdfs;
     }
 
     public Runner getRunner() {
@@ -433,6 +438,12 @@ public class AgentProperties {
          * 将没有任何途径被理解。
          */
         private boolean imageUnderstand = true;
+        /**
+         * 自定义工具：文档理解（{@code understand_document}），针对大/多页扫描 PDF。
+         * 默认开启。PDF 逐页栅格化后分批交给视觉模型（{@code agent.vision}）抽取用户指定的
+         * 关键信息，图片字节不进入主模型上下文；与 {@code understand_image} 同样防循环。
+         */
+        private boolean documentUnderstand = true;
 
         private String workingDir = "./agent-workspace";
         /** Empty means no allowlist is configured. */
@@ -486,6 +497,14 @@ public class AgentProperties {
 
         public void setImageUnderstand(boolean imageUnderstand) {
             this.imageUnderstand = imageUnderstand;
+        }
+
+        public boolean isDocumentUnderstand() {
+            return documentUnderstand;
+        }
+
+        public void setDocumentUnderstand(boolean documentUnderstand) {
+            this.documentUnderstand = documentUnderstand;
         }
 
 
@@ -645,6 +664,97 @@ public class AgentProperties {
 
         public void setMaxMetadataChars(int maxMetadataChars) {
             this.maxMetadataChars = maxMetadataChars;
+        }
+    }
+
+    /**
+     * 文档理解工具（{@code understand_document}）的配置，面向大/多页扫描 PDF。
+     *
+     * <p>与 {@link Vision} 配合：PDF 逐页栅格化后，每 {@code pagesPerCall} 页一批交给视觉模型
+     * （并发 {@code concurrency}），抽取调用方指定的关键信息并回页码。页数不设硬上限，
+     * 由任务级超时兑底。
+     */
+    public static class Pdfs {
+        private boolean enabled = true;
+        /** 每次 VL 调用吽多少页。必须≤视觉模型单次图数上限（{@code agent.vision.max-images}）。 */
+        private int pagesPerCall = 6;
+        /** 并行批数上限。 */
+        private int concurrency = 4;
+        /** 栅格化最长边像素（控 token）；0=不缩放。pdftoppm -scale-to。 */
+        private int maxImageDimension = 1568;
+        /** 栅格化 JPEG 质量。 */
+        private int jpegQuality = 85;
+        /** 单次 VL 调用超时（秒）。 */
+        private int timeoutSeconds = 120;
+        /** PDF 下载体积上限（字节），防 DoS。 */
+        private int maxDownloadBytes = 200 * 1024 * 1024;
+        /**
+         * SSRF 主机白名单（按后缀匹配，如 {@code internal.example}）；空=允许任意 http/https（与图片工具一致）。
+         */
+        private List<String> ssrfAllowlist = new ArrayList<>();
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public int getPagesPerCall() {
+            return pagesPerCall;
+        }
+
+        public void setPagesPerCall(int pagesPerCall) {
+            this.pagesPerCall = Math.max(1, pagesPerCall);
+        }
+
+        public int getConcurrency() {
+            return concurrency;
+        }
+
+        public void setConcurrency(int concurrency) {
+            this.concurrency = Math.max(1, concurrency);
+        }
+
+        public int getMaxImageDimension() {
+            return maxImageDimension;
+        }
+
+        public void setMaxImageDimension(int maxImageDimension) {
+            this.maxImageDimension = maxImageDimension;
+        }
+
+        public int getJpegQuality() {
+            return jpegQuality;
+        }
+
+        public void setJpegQuality(int jpegQuality) {
+            this.jpegQuality = jpegQuality;
+        }
+
+        public int getTimeoutSeconds() {
+            return timeoutSeconds;
+        }
+
+        public void setTimeoutSeconds(int timeoutSeconds) {
+            this.timeoutSeconds = timeoutSeconds;
+        }
+
+        public int getMaxDownloadBytes() {
+            return maxDownloadBytes;
+        }
+
+        public void setMaxDownloadBytes(int maxDownloadBytes) {
+            this.maxDownloadBytes = maxDownloadBytes;
+        }
+
+        public List<String> getSsrfAllowlist() {
+            return ssrfAllowlist;
+        }
+
+        public void setSsrfAllowlist(List<String> ssrfAllowlist) {
+            this.ssrfAllowlist = ssrfAllowlist == null ? new ArrayList<>() : ssrfAllowlist;
         }
     }
 }

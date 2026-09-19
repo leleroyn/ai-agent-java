@@ -125,6 +125,25 @@ agent:
     # Backpressure: refuse new submissions beyond this many still-queued tasks. 0 disables.
     max-queued-tasks: ${AGENT_MAX_QUEUED_TASKS:1000}
 
+  # 文档理解工具（understand_document）：大/多页扫描 PDF 逐页栅格化后分批交给视觉模型抽取关键信息。
+  # 视觉端点复用上方 agent.vision；图片字节不进主模型上下文。页数不设硬上限，由任务级超时兜底。
+  pdf:
+    enabled: ${AGENT_PDF_ENABLED:true}
+    # 每次 VL 调用喂多少页；必须≤agent.vision.max-images。
+    pages-per-call: ${AGENT_PDF_PAGES_PER_CALL:6}
+    # 并行批数上限。
+    concurrency: ${AGENT_PDF_CONCURRENCY:4}
+    # 栅格化最长边像素（控 token；0=不缩放）。pdftoppm -scale-to。
+    max-image-dimension: ${AGENT_PDF_MAX_DIM:1568}
+    jpeg-quality: ${AGENT_PDF_JPEG_QUALITY:85}
+    # 单次 VL 调用超时（秒）。
+    timeout-seconds: ${AGENT_PDF_TIMEOUT:120}
+    # PDF 下载体积上限（字节），防 DoS。
+    max-download-bytes: ${AGENT_PDF_MAX_DOWNLOAD_BYTES:209715200}
+    # SSRF 主机白名单（后缀匹配）；留空=允许任意 http/https（与图片工具一致）。
+    # ssrf-allowlist:
+    #   - internal.example
+
   tools:
     # Decision: expose all built-in tools. Requires permission-mode BYPASS.
     shell: ${AGENT_TOOL_SHELL:true}
@@ -136,6 +155,8 @@ agent:
     # 自定义工具：understand_image（图片理解）。默认全局开启。图片走独立视觉模型
     # （agent.vision），不进主模型上下文；关掉后 instruction 里的图片 URL 将无法被理解。
     image-understand: ${AGENT_TOOL_IMAGE_UNDERSTAND:true}
+    # 自定义工具：understand_document（大/多页扫描 PDF 抽取）。默认开启，参数见下方 agent.pdf。
+    document-understand: ${AGENT_TOOL_DOCUMENT_UNDERSTAND:true}
 
     # Sandbox root. Each task gets its own private subdirectory <working-dir>/<taskId>,
     # which is what the file tools are actually confined to.

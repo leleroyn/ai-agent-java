@@ -91,6 +91,8 @@ RUN set -eux; \
         python3-numpy python3-pandas python3-requests python3-yaml \
         python3-dateutil python3-tabulate python3-openpyxl \
         python3-lxml python3-bs4 \
+        # PDF 处理：pdftoppm/pdfinfo，供 understand_document 逐页栅格化扫描版 PDF
+        poppler-utils \
     ; \
     ln -sf "/usr/share/zoneinfo/${TZ}" /etc/localtime; \
     dpkg-reconfigure -f noninteractive tzdata >/dev/null 2>&1 || true; \
