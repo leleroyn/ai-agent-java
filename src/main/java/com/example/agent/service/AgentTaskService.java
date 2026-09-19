@@ -133,11 +133,6 @@ public class AgentTaskService {
         return store.find(taskId);
     }
 
-    /** Recent tasks for operator inspection, newest first. */
-    public List<TaskRecord> listRecent(int limit) {
-        return store.listRecent(limit);
-    }
-
     /**
      * Cancel a queued or running task.
      *

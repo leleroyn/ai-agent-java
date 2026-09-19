@@ -5,7 +5,6 @@ import com.example.agent.model.TaskStatus;
 
 import java.time.Duration;
 import java.time.Instant;
-import java.util.List;
 import java.util.Optional;
 
 /**
@@ -100,7 +99,4 @@ public interface TaskStore {
 
     /** Queue depth for a status, used for backpressure and health reporting. */
     long countByStatus(TaskStatus status);
-
-    /** Most recently created tasks, for operator inspection. */
-    List<TaskRecord> listRecent(int limit);
 }

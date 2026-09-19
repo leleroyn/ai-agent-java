@@ -343,12 +343,6 @@ public class MysqlTaskStore implements TaskStore {
         jdbc.update("DELETE FROM agent_task WHERE task_id = ? AND status = ?", taskId, status);
     }
 
-    @Override
-    public List<TaskRecord> listRecent(int limit) {
-        String sql = "SELECT " + COLUMNS + " FROM agent_task ORDER BY created_at DESC LIMIT ?";
-        return jdbc.query(sql, MAPPER, limit);
-    }
-
     private static String truncate(String value, int max) {
         if (value == null) {
             return null;

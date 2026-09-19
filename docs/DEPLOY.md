@@ -181,4 +181,4 @@ docker run --rm --entrypoint sh ai-agent-java:1.0.0 -c 'du -sh /workspace'
 - [ ] 并发/队列/超时按容量核定：`AGENT_MAX_CONCURRENT`、`AGENT_MAX_QUEUED_TASKS`、`AGENT_DEFAULT_TIMEOUT`
 - [ ] 镜像内存限制 ≥ 2GB（`JAVA_OPTS` 用 `MaxRAMPercentage=75`，Python+pandas 也要占堆外与 RSS）
 - [ ] 确认服务边界：当前**无鉴权** + `permission-mode=BYPASS` + shell，等于把容器内的命令执行开放给能访问该端口的人。安全边界是"容器 + 每任务独立子目录"，不要把裸端口暴露到不可信网络；需要收紧时看 `agent.tools.shell-allowed-commands` 与权限模式
-- [ ] `GET /api/v1/agent/health` 通过，且 `GET /api/v1/agent/tasks` 无异常残留任务
+- [ ] `GET /api/v1/agent/health` 通过；`GET /api/v1/agent/tools` 返回的工具集与预期的 `agent.tools.*` 开关一致

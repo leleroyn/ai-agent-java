@@ -1,5 +1,6 @@
 package com.example.agent.api;
 
+import com.example.agent.agent.ToolkitFactory;
 import com.example.agent.config.AgentProperties;
 import com.example.agent.model.AgentTaskRequest;
 import com.example.agent.model.TaskRecord;
@@ -13,7 +14,6 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
@@ -27,7 +27,7 @@ import java.util.Optional;
  * POST   /api/v1/agent/task          submit a task
  * GET    /api/v1/agent/task/{id}     poll status and result
  * DELETE /api/v1/agent/task/{id}     cancel a queued or running task
- * GET    /api/v1/agent/tasks         recent tasks (operator view)
+ * GET    /api/v1/agent/tools         tools currently registered for a task (name + description)
  * GET    /api/v1/agent/skills        installed skill names
  * GET    /api/v1/agent/health        queue occupancy and liveness
  * </pre>
@@ -46,11 +46,14 @@ public class AgentController {
     private final AgentTaskService service;
     private final AgentProperties props;
     private final ObjectMapper mapper;
+    private final ToolkitFactory toolkitFactory;
 
-    public AgentController(AgentTaskService service, AgentProperties props, ObjectMapper mapper) {
+    public AgentController(AgentTaskService service, AgentProperties props, ObjectMapper mapper,
+                           ToolkitFactory toolkitFactory) {
         this.service = service;
         this.props = props;
         this.mapper = mapper;
+        this.toolkitFactory = toolkitFactory;
     }
 
     /**
@@ -114,14 +117,14 @@ public class AgentController {
                 .orElse(null));
     }
 
-    /** Most recently created tasks, newest first. {@code limit} defaults to 20, capped server-side. */
-    @GetMapping("/tasks")
-    public ApiResponse<List<TaskStatusView>> list(@RequestParam(defaultValue = "20") int limit) {
-        int capped = Math.min(Math.max(1, limit), props.getExecution().getMaxPageSize());
-        List<TaskStatusView> items = service.listRecent(capped).stream()
-                .map(record -> TaskStatusView.of(record, mapper))
-                .toList();
-        return ApiResponse.ok(items);
+    /**
+     * The tools currently registered for a task, as the model sees them ({@code name} +
+     * {@code description}). Reflects the live {@code agent.tools.*} config; useful for operators
+     * to confirm which capabilities (shell, file tools, media understand/extract, time) are on.
+     */
+    @GetMapping("/tools")
+    public ApiResponse<List<Map<String, Object>>> tools() {
+        return ApiResponse.ok(toolkitFactory.registeredTools());
     }
 
     /**

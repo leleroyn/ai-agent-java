@@ -326,33 +326,38 @@ curl -X POST http://localhost:8080/api/v1/agent/task \
 
 ---
 
-## 6. 任务列表
+## 6. 已注册工具
 
-`GET /tasks?limit=20`
+`GET /tools`
 
-运维查看，按创建时间倒序。`limit` 默认 20，上限 100（超出自动截断，不报错）。
+返回当前**每个任务会注册的工具**（即模型实际可见的能力），反映 `agent.tools.*` 的实时开关。运维用它确认 shell、读写文件、图片/PDF 理解与抽取、系统时间等能力是否开启。
+
+全部开关默认开启时，实测返回 11 个工具：
 
 ```json
 {
   "code": 0,
   "data": [
-    {
-      "taskId": "v2-cancel-1",
-      "status": "cancelled",
-      "createdAt": "2026-09-17T14:12:15.386Z",
-      "startedAt": "2026-09-17T14:12:18.409Z",
-      "completedAt": "2026-09-17T14:12:22.929Z"
-    },
-    {
-      "taskId": "v2-a1",
-      "status": "completed",
-      "resultText": "ok",
-      "usage": { "inputTokens": 1944, "outputTokens": 2, "totalTokens": 1946 },
-      "durationMs": 8889
-    }
+    { "name": "execute_shell_command", "description": "Execute a shell command ……" },
+    { "name": "extract_image_fields", "description": "从图片里结构化抽取指定字段……" },
+    { "name": "extract_pdf_fields", "description": "从 PDF 文档整篇抽取指定关键信息并定位页码……" },
+    { "name": "get_system_time", "description": "获取服务器当前日期和时间……" },
+    { "name": "insert_text_file", "description": "……" },
+    { "name": "list_directory", "description": "……" },
+    { "name": "todo_write", "description": "……" },
+    { "name": "understand_image", "description": "对图片做自由理解/问答……" },
+    { "name": "understand_pdf", "description": "对 PDF 做自由理解/问答……" },
+    { "name": "view_text_file", "description": "……" },
+    { "name": "write_text_file", "description": "……" }
   ]
 }
 ```
+
+说明：
+
+- `name` 是模型调用时用的工具名，`description` 是用途说明——两者都取自**真正装配出来的工具 schema**，与运行时完全一致，不是另写的一份清单。
+- 列表随 `agent.tools.*` 配置变化：关掉某个开关（如 `AGENT_TOOL_IMAGE_EXTRACT=false`），对应工具就不再出现。
+- 内置工具的真实名字由框架定义（shell 为 `execute_shell_command`，文件为 `view_text_file`/`write_text_file`/`insert_text_file`/`list_directory`，待办为 `todo_write`）；自定义工具名为 `understand_image`/`extract_image_fields`/`understand_pdf`/`extract_pdf_fields`/`get_system_time`。
 
 ---
 
@@ -452,7 +457,6 @@ done
 | 队列积压上限（超过返 3001） | 1000 | `AGENT_MAX_QUEUED_TASKS` |
 | 任务领取租约 | 90 秒 | `AGENT_LEASE_SECONDS` |
 | 单任务最多领取次数 | 2 | `AGENT_MAX_ATTEMPTS` |
-| `/tasks` 单页上限 | 100 | — |
 | 单任务最多指定技能数 | 8 | `AGENT_SKILLS_MAX_REQUESTED` |
 | 注入技能正文总量上限 | 12000 字符 | `AGENT_SKILLS_MAX_INLINE_CHARS` |
 | 技能开关 / 目录 | true / `./agent-skills` | `AGENT_SKILLS_ENABLED` / `AGENT_SKILLS_DIR` |

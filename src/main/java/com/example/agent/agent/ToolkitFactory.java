@@ -9,6 +9,7 @@ import com.example.agent.agent.tool.ImageUnderstandTools;
 import com.example.agent.agent.tool.SystemTimeTools;
 import com.example.agent.config.AgentProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.agentscope.core.model.ToolSchema;
 import io.agentscope.core.tool.Toolkit;
 import io.agentscope.core.tool.builtin.TodoTools;
 import io.agentscope.core.tool.coding.ShellCommandTool;
@@ -21,8 +22,11 @@ import org.springframework.stereotype.Component;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -113,6 +117,29 @@ public class ToolkitFactory {
 
         log.debug("toolkit assembled enabled={} taskDir={}", registered, base);
         return toolkit;
+    }
+
+    /**
+     * The tools that would be registered for a task right now, as the model sees them: each
+     * {@code {name, description}} comes straight from the assembled {@link Toolkit} schemas, so
+     * this reflects the live {@code agent.tools.*} config rather than a separate list.
+     *
+     * <p>Built against a throwaway probe directory (the configured working-dir root); tool names
+     * and descriptions do not depend on the per-task sandbox, and constructing the tools only
+     * stores that base path — nothing on disk is touched.
+     */
+    public List<Map<String, Object>> registeredTools() {
+        Path probe = Path.of(props.getTools().getWorkingDir()).toAbsolutePath().normalize();
+        Toolkit toolkit = build(probe);
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (ToolSchema schema : toolkit.getToolSchemas()) {
+            Map<String, Object> entry = new LinkedHashMap<>();
+            entry.put("name", schema.getName());
+            entry.put("description", schema.getDescription());
+            out.add(entry);
+        }
+        out.sort(Comparator.comparing(m -> String.valueOf(m.get("name"))));
+        return out;
     }
 
     /**

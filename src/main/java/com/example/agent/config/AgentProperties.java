@@ -313,7 +313,6 @@ public class AgentProperties {
         private int maxConcurrent = 4;
         private int defaultTimeoutSeconds = 120;
         private int maxTimeoutSeconds = 900;
-        private int maxPageSize = 100;
 
         /** How long a claim stays valid; must be renewed while the task runs. */
         private int leaseSeconds = 90;
@@ -354,14 +353,6 @@ public class AgentProperties {
 
         public void setMaxTimeoutSeconds(int maxTimeoutSeconds) {
             this.maxTimeoutSeconds = maxTimeoutSeconds;
-        }
-
-        public int getMaxPageSize() {
-            return maxPageSize;
-        }
-
-        public void setMaxPageSize(int maxPageSize) {
-            this.maxPageSize = maxPageSize;
         }
 
         public int getLeaseSeconds() {

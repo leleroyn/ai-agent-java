@@ -119,8 +119,6 @@ agent:
     max-concurrent: ${AGENT_MAX_CONCURRENT:4}
     default-timeout-seconds: ${AGENT_DEFAULT_TIMEOUT:120}
     max-timeout-seconds: ${AGENT_MAX_TIMEOUT:900}
-    # Cap on how many result rows GET /tasks keeps per page.
-    max-page-size: 100
     # A claim is valid for this long and is renewed while the task runs. If the process dies the
     # lease lapses and the task is handed back to the queue instead of being lost.
     lease-seconds: ${AGENT_LEASE_SECONDS:90}
