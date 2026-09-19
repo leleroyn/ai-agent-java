@@ -1,5 +1,7 @@
 package com.example.agent.agent;
 
+import com.example.agent.agent.PdfService;
+import com.example.agent.agent.tool.DocumentUnderstandTools;
 import com.example.agent.agent.tool.ImageUnderstandTools;
 import com.example.agent.agent.tool.SystemTimeTools;
 import com.example.agent.config.AgentProperties;
@@ -38,12 +40,14 @@ public class ToolkitFactory {
     private final AgentProperties props;
     private final SystemTimeTools systemTimeTools;
     private final ImageUnderstandTools imageUnderstandTools;
+    private final PdfService pdfService;
 
     public ToolkitFactory(AgentProperties props, SystemTimeTools systemTimeTools,
-                          ImageUnderstandTools imageUnderstandTools) {
+                          ImageUnderstandTools imageUnderstandTools, PdfService pdfService) {
         this.props = props;
         this.systemTimeTools = systemTimeTools;
         this.imageUnderstandTools = imageUnderstandTools;
+        this.pdfService = pdfService;
     }
 
     /**
@@ -87,6 +91,12 @@ public class ToolkitFactory {
         // 这是“某些图不想经过主模型”这一需求的实现方式。无状态，单例复用安全。
         if (t.isImageUnderstand()) {
             register(toolkit, imageUnderstandTools, "image-understand", registered);
+        }
+
+        // 自定义工具：文档理解。针对大/多页扫描 PDF，服务端逐页栅格化后分批交给视觉模型。需要
+        // 任务沙箱放下载与临时页图，故每任务 new 一个（非常规 Spring 单例），与文件工具同模式。
+        if (t.isDocumentUnderstand()) {
+            register(toolkit, new DocumentUnderstandTools(pdfService, taskDir), "document-understand", registered);
         }
 
         log.debug("toolkit assembled enabled={} taskDir={}", registered, base);

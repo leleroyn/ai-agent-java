@@ -115,6 +115,51 @@ public class VisionClient {
         }
     }
 
+    /**
+     * 直接用已经准备好的图片 data URL 调用视觉模型（不再下载）。供 {@code understand_document}
+     * 把 PDF 逐页栅格化后的图像喂给视觉模型用。返回文字结论，失败返回 {@code "Error: ..."}。
+     */
+    public String extractFromDataUrls(List<String> dataUrls, String prompt) {
+        AgentProperties.Vision v = props.getVision();
+        if (!v.isEnabled()) {
+            return "Error: 视觉功能未启用（agent.vision.enabled=false）。";
+        }
+        if (dataUrls == null || dataUrls.isEmpty()) {
+            return "Error: 未提供任何图片。";
+        }
+        try {
+            List<ImageData> images = new ArrayList<>(dataUrls.size());
+            for (String d : dataUrls) {
+                images.add(ImageData.ok(d));
+            }
+            byte[] body = buildRequest(v, prompt, images);
+            Duration timeout = Duration.ofSeconds(v.getTimeoutSeconds());
+            HttpRequest req = HttpRequest.newBuilder(URI.create(trimSlash(v.getBaseUrl()) + "/chat/completions"))
+                    .timeout(timeout)
+                    .header("Content-Type", "application/json")
+                    .header("Authorization", "Bearer " + (v.getApiKey() == null ? "" : v.getApiKey()))
+                    .POST(HttpRequest.BodyPublishers.ofByteArray(body))
+                    .build();
+            long start = System.nanoTime();
+            HttpResponse<byte[]> resp = http.send(req, HttpResponse.BodyHandlers.ofByteArray());
+            long ms = (System.nanoTime() - start) / 1_000_000;
+            String respBody = new String(resp.body(), StandardCharsets.UTF_8);
+            if (resp.statusCode() / 100 != 2) {
+                log.warn("vision(dataUrl) HTTP {} in {}ms body={}", resp.statusCode(), ms, snippet(respBody));
+                return "Error: 视觉模型返回 HTTP " + resp.statusCode() + "：" + snippet(respBody);
+            }
+            String text = extractContent(respBody);
+            if (text == null || text.isBlank()) {
+                return "Error: 视觉模型返回了空内容。";
+            }
+            log.info("vision(dataUrl) ok images={} in {}ms chars={}", images.size(), ms, text.length());
+            return text;
+        } catch (Exception e) {
+            log.error("vision(dataUrl) call failed", e);
+            return "Error: 调用视觉模型失败：" + e.getClass().getSimpleName() + ": " + e.getMessage();
+        }
+    }
+
     /** 下载单张图并转成 data URL；任何不合规情况通过 {@link ImageData#error} 返回可读错误。 */
     private ImageData downloadAsDataUrl(String url, AgentProperties.Vision v) {
         if (url == null || url.isBlank()) {

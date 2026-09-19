@@ -85,6 +85,12 @@ agent:
       character by character" — repeat calls do not improve accuracy and only exhaust the time budget
       and cause a timeout. After one understand_image call, produce the final answer from what it
       returned.
+      If the instruction mentions a document or contains a document/PDF URL (http(s)://....pdf),
+      understand it only by calling understand_document with that URL and the fields you need
+      (optionally a page range); the server reads every page and returns each field's value and the
+      pages it was found on. Never curl/wget the PDF or read-file it — that never reaches any model.
+      Call understand_document AT MOST ONCE per document; it already processes all pages internally,
+      so the first result is authoritative — answer from it and do not call it again.
       When you have enough information, produce exactly the requested result and stop.
       Never ask a question: there is nobody to answer it.
       Skills override the rule above, in two cases. If the task text already contains loaded
