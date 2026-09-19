@@ -15,6 +15,8 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -184,23 +186,54 @@ public class VisionClient {
             if (resp.statusCode() / 100 != 2) {
                 return ImageData.fail("Error: 下载图片失败 HTTP " + resp.statusCode() + "：" + url);
             }
-            byte[] bytes = resp.body();
-            if (bytes == null || bytes.length == 0) {
-                return ImageData.fail("Error: 下载到的图片为空：" + url);
-            }
-            if (bytes.length > v.getMaxImageBytes()) {
-                return ImageData.fail("Error: 图片过大（" + bytes.length + " 字节），超过上限 "
-                        + v.getMaxImageBytes() + " 字节：" + url);
-            }
-            String mime = detectMime(bytes, resp.headers().firstValue("content-type").orElse(""));
-            if (mime == null) {
-                return ImageData.fail("Error: 该地址不是受支持的图片（PNG/JPEG/GIF/WEBP）：" + url);
-            }
-            return ImageData.ok("data:" + mime + ";base64," + Base64.getEncoder().encodeToString(bytes));
+            return dataUrlFromBytes(resp.body(),
+                    resp.headers().firstValue("content-type").orElse(""), url, v);
         } catch (Exception e) {
             return ImageData.fail("Error: 下载图片异常：" + e.getClass().getSimpleName()
                     + ": " + e.getMessage() + "（" + url + "）");
         }
+    }
+
+    /**
+     * 把图片 URL 下载成 data URL。成功返回 {@code data:...}，失败返回以 {@code "Error: "} 开头的可读说明。
+     * 供工具层在「URL 或本地文件」混用时统一成 data URL。
+     */
+    public String dataUrlFromUrl(String url) {
+        ImageData d = downloadAsDataUrl(url, props.getVision());
+        return d.error != null ? d.error : d.dataUrl;
+    }
+
+    /**
+     * 读本地图片文件成 data URL。<b>调用方必须已确保路径在任务沙箱内</b>（沙箱校验属于工具层）。
+     * 成功返回 {@code data:...}，失败返回以 {@code "Error: "} 开头的说明。
+     */
+    public String dataUrlFromLocalFile(Path file) {
+        byte[] bytes;
+        try {
+            bytes = Files.readAllBytes(file);
+        } catch (Exception e) {
+            return "Error: 读取本地图片失败：" + e.getClass().getSimpleName() + ": "
+                    + e.getMessage() + "（" + file + "）";
+        }
+        ImageData d = dataUrlFromBytes(bytes, "", file.toString(), props.getVision());
+        return d.error != null ? d.error : d.dataUrl;
+    }
+
+    /** 字节→data URL 的公共校验：非空、体积上限、魔数判 MIME、base64。{@code errLabel} 用于错误里指代来源。 */
+    private ImageData dataUrlFromBytes(byte[] bytes, String ctHeader, String errLabel,
+                                       AgentProperties.Vision v) {
+        if (bytes == null || bytes.length == 0) {
+            return ImageData.fail("Error: 图片为空：" + errLabel);
+        }
+        if (bytes.length > v.getMaxImageBytes()) {
+            return ImageData.fail("Error: 图片过大（" + bytes.length + " 字节），超过上限 "
+                    + v.getMaxImageBytes() + " 字节：" + errLabel);
+        }
+        String mime = detectMime(bytes, ctHeader);
+        if (mime == null) {
+            return ImageData.fail("Error: 不是受支持的图片（PNG/JPEG/GIF/WEBP）：" + errLabel);
+        }
+        return ImageData.ok("data:" + mime + ";base64," + Base64.getEncoder().encodeToString(bytes));
     }
 
     /** 以魔数为准判定 MIME（content-type 头可能被服务端乱给）；不支持的返回 null。 */

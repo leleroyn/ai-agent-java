@@ -37,11 +37,13 @@ public class DocumentUnderstandTools {
             name = "understand_document",
             description = "理解文档（尤其是大文件、多页扫描版 PDF）的正确方式。当任务涉及 PDF，"
                     + "或 instruction 里出现 PDF 的 URL（如 http(s)://....pdf），需要从中找出关键信息"
-                    + "并定位到页码时，必须调用本工具——把文档 URL、要抽取的字段（fields）、可选页范围传进来，"
+                    + "并定位到页码时，必须调用本工具——把文档来源、要抽取的字段（fields）、可选页范围传进来，"
                     + "服务端会逐页交给视觉模型抽取，返回每个字段的值和它出现的页码。"
-                    + "严禁用 shell 的 curl/wget 下载 PDF、用 read-file 读 PDF、或用 pdftotext/pdftoppm/pdfimages 等命令自己转 PDF——"
-                    + "前者文档进不了任何模型只会让你空转到超时，后者会把大文档原文成百上千行灌进上下文撑爆预算，"
-                    + "且对扫描版 PDF 根本抽不出文字。本工具是唯一正确路径。"
+                    + "文档来源(pdf_url)可以是 http/https URL，也可以是本任务工作目录下的本地 PDF 路径"
+                    + "（若文件只能经 shell 拿到，先把它下载到当前工作目录存成文件，再传该路径；本地路径限本任务沙箱内）。"
+                    + "但绝不要把文档内容打印到 stdout、用 read-file 读进对话、或用 pdftotext/pdftoppm/pdfimages 把内容抽出来直接看"
+                    + "——那样会把大文档原文成百上千行灌进上下文撑爆预算，且对扫描版 PDF 根本抽不出文字。"
+                    + "把文档交给本工具（传 URL 或本地路径）才是唯一正确方式。"
                     + "fields 写清楚要知道哪些信息（例如“合同甲方；合同金额;签署日期”）。"
                     + "page_range 可留空表示整份文档，也可只处理某几页（如 \"1-20\"）。"
                     + "【重要·防循环】对同一份文档最多只调用本工具一次：它内部已处理全部所需页，"
@@ -51,7 +53,8 @@ public class DocumentUnderstandTools {
     public String understandDocument(
             @ToolParam(
                     name = "pdf_url",
-                    description = "文档（PDF）的地址，必须是 http/https。",
+                    description = "文档（PDF）：http/https URL，或本任务工作目录下的本地 PDF 文件路径"
+                            + "（例如你刚用 shell 下载到当前目录的 PDF，或调用方预置的文件）。",
                     required = true)
             String pdfUrl,
             @ToolParam(

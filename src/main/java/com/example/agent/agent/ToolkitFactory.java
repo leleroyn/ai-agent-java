@@ -1,6 +1,7 @@
 package com.example.agent.agent;
 
 import com.example.agent.agent.PdfService;
+import com.example.agent.agent.VisionClient;
 import com.example.agent.agent.tool.DocumentUnderstandTools;
 import com.example.agent.agent.tool.ImageUnderstandTools;
 import com.example.agent.agent.tool.SystemTimeTools;
@@ -39,14 +40,14 @@ public class ToolkitFactory {
 
     private final AgentProperties props;
     private final SystemTimeTools systemTimeTools;
-    private final ImageUnderstandTools imageUnderstandTools;
+    private final VisionClient visionClient;
     private final PdfService pdfService;
 
     public ToolkitFactory(AgentProperties props, SystemTimeTools systemTimeTools,
-                          ImageUnderstandTools imageUnderstandTools, PdfService pdfService) {
+                          VisionClient visionClient, PdfService pdfService) {
         this.props = props;
         this.systemTimeTools = systemTimeTools;
-        this.imageUnderstandTools = imageUnderstandTools;
+        this.visionClient = visionClient;
         this.pdfService = pdfService;
     }
 
@@ -87,10 +88,10 @@ public class ToolkitFactory {
             register(toolkit, systemTimeTools, "system-time", registered);
         }
 
-        // 自定义工具：图片理解。图片走独立的视觉模型（agent.vision），字节不进主模型上下文；
-        // 这是“某些图不想经过主模型”这一需求的实现方式。无状态，单例复用安全。
+        // 自定义工具：图片理解。图片走独立的视觉模型（agent.vision），字节不进主模型上下文。
+        // 因需携带任务沙箱目录以支持本地文件输入，故每任务 new 一个（与文件工具同模式）。
         if (t.isImageUnderstand()) {
-            register(toolkit, imageUnderstandTools, "image-understand", registered);
+            register(toolkit, new ImageUnderstandTools(visionClient, props, taskDir), "image-understand", registered);
         }
 
         // 自定义工具：文档理解。针对大/多页扫描 PDF，服务端逐页栅格化后分批交给视觉模型。需要

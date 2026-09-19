@@ -86,9 +86,23 @@ public class PdfService {
             return "Error: fields 为空，请说明要抽取哪些关键信息。";
         }
         Path pdf = null;
+        boolean downloaded = false;
         try {
-            URI uri = validateUrl(pdfUrl, cfg);
-            pdf = download(uri, taskDir, cfg.getMaxDownloadBytes());
+            if (isHttpUrl(pdfUrl)) {
+                URI uri = validateUrl(pdfUrl, cfg);
+                pdf = download(uri, taskDir, cfg.getMaxDownloadBytes());
+                downloaded = true;
+            } else {
+                // 本地文档：只允许任务沙箱内的文件，绝不删除源文件（可能是调用方预置的）。
+                Path local = SandboxPaths.resolveWithin(taskDir, pdfUrl);
+                if (local == null) {
+                    return "Error: 本地文档路径必须在任务工作目录内，已拒绝越界访问：" + pdfUrl;
+                }
+                if (!Files.isRegularFile(local)) {
+                    return "Error: 本地文档文件不存在：" + pdfUrl + "（相对本任务工作目录）。";
+                }
+                pdf = local;
+            }
             int total = pageCount(pdf);
             int[] range = resolveRange(pageRange, total);
             int start = range[0];
@@ -150,7 +164,14 @@ public class PdfService {
             log.error("pdf extract failed url={}", pdfUrl, e);
             return "Error: 处理 PDF 失败：" + e.getClass().getSimpleName() + ": " + e.getMessage();
         } finally {
-            cleanup(pdf, taskDir);
+            cleanupTempImages(taskDir);
+            if (downloaded && pdf != null) {
+                try {
+                    Files.deleteIfExists(pdf);
+                } catch (Exception ignored) {
+                    // 源 PDF 是下载来的临时文件，删失败无妨（taskDir 会随任务清理）
+                }
+            }
         }
     }
 
@@ -509,6 +530,15 @@ public class PdfService {
         return mapper.writeValueAsString(root);
     }
 
+    /** 是否 http/https URL（否则视为沙箱本地路径）。 */
+    private static boolean isHttpUrl(String s) {
+        if (s == null) {
+            return false;
+        }
+        String t = s.trim().toLowerCase();
+        return t.startsWith("http://") || t.startsWith("https://");
+    }
+
     private static List<String> parseFields(String raw) {
         LinkedHashSet<String> set = new LinkedHashSet<>();
         if (raw != null) {
@@ -522,12 +552,9 @@ public class PdfService {
         return new ArrayList<>(set);
     }
 
-    /** 删除本次下载的 PDF 与残留的页面临时图（taskDir 会随任务清理，这里提前回收磁盘）。 */
-    private void cleanup(Path pdf, Path taskDir) {
+    /** 删除残留的页面临时图（只删我们生成的 pg*.jpg；下载来的源 PDF 由调用处按模式决定删不删）。 */
+    private void cleanupTempImages(Path taskDir) {
         try {
-            if (pdf != null) {
-                Files.deleteIfExists(pdf);
-            }
             if (taskDir != null && Files.isDirectory(taskDir)) {
                 try (var stream = Files.list(taskDir)) {
                     stream.filter(p -> {

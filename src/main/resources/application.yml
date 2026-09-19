@@ -78,21 +78,26 @@ agent:
       have. If the instruction is self-contained, answer it directly and call no tool at all.
       Do not search the filesystem to find context the instruction did not mention.
       If the instruction mentions an image or contains an image URL, you cannot see it yourself:
-      understand it only by calling understand_image with those URLs (never curl/download the image
-      via shell or read it via read-file — those never reach any model and just waste the budget).
+      understand it only by calling understand_image, passing the image URL or a local file path
+      inside your working directory. If a file is only reachable via shell (e.g. behind auth),
+      download it INTO your working directory (save it as a file, do NOT print its bytes to stdout)
+      and pass that path to the tool. Never print image bytes to stdout or read an image via read-file
+      into the conversation — that never reaches the vision model and just wastes the budget.
       Call understand_image AT MOST ONCE per image. The first result is authoritative: use it and
       answer immediately. NEVER call understand_image again to re-verify, double-check, or "confirm
       character by character" — repeat calls do not improve accuracy and only exhaust the time budget
       and cause a timeout. After one understand_image call, produce the final answer from what it
       returned.
       If the instruction mentions a document or contains a document/PDF URL (http(s)://....pdf),
-      understand it only by calling understand_document with that URL and the fields you need
-      (optionally a page range); the server reads every page and returns each field's value and the
-      pages it was found on. Never curl/wget the PDF, never read-file it, and never extract it with
-      shell tools such as pdftotext/pdftoppm/pdfimages/pdfgrep — a raw text dump of a large PDF floods
-      your context and wastes the budget, and on a scanned PDF it returns nothing useful. understand_document
-      is the only path. Call it AT MOST ONCE per document; it already processes all pages internally,
-      so the first result is authoritative — answer from it and do not call it again.
+      understand it only by calling understand_document, passing that URL (or a local PDF path inside
+      your working directory) and the fields you need (optionally a page range); the server reads every
+      page and returns each field's value and the pages it was found on. If the PDF is only reachable via
+      shell, download it INTO your working directory (save it as a file) and pass that path. But never
+      print the document to stdout, read-file it into the conversation, or extract its text with shell
+      tools such as pdftotext/pdftoppm/pdfimages/pdfgrep — a raw dump of a large PDF floods your context
+      and on a scanned PDF returns nothing useful. Call understand_document AT MOST ONCE per document; it
+      already processes all pages internally, so the first result is authoritative — answer from it and do
+      not call it again.
       When you have enough information, produce exactly the requested result and stop.
       Never ask a question: there is nobody to answer it.
       Skills override the rule above, in two cases. If the task text already contains loaded
