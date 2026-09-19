@@ -13,7 +13,7 @@
 
     <groupId>com.example</groupId>
     <artifactId>ai-agent-java</artifactId>
-    <version>1.0.0</version>
+    <version>1.1.0</version>
     <name>ai-agent-java</name>
     <description>Agent task service built on AgentScope Java</description>
 
