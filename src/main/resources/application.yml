@@ -88,8 +88,10 @@ agent:
       If the instruction mentions a document or contains a document/PDF URL (http(s)://....pdf),
       understand it only by calling understand_document with that URL and the fields you need
       (optionally a page range); the server reads every page and returns each field's value and the
-      pages it was found on. Never curl/wget the PDF or read-file it — that never reaches any model.
-      Call understand_document AT MOST ONCE per document; it already processes all pages internally,
+      pages it was found on. Never curl/wget the PDF, never read-file it, and never extract it with
+      shell tools such as pdftotext/pdftoppm/pdfimages/pdfgrep — a raw text dump of a large PDF floods
+      your context and wastes the budget, and on a scanned PDF it returns nothing useful. understand_document
+      is the only path. Call it AT MOST ONCE per document; it already processes all pages internally,
       so the first result is authoritative — answer from it and do not call it again.
       When you have enough information, produce exactly the requested result and stop.
       Never ask a question: there is nobody to answer it.
