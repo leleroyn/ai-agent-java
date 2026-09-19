@@ -54,6 +54,8 @@ public class ImageUnderstandTools {
                     + "图片来源(image_urls)可以是 http/https 的 URL，也可以是本任务工作目录下的本地图片文件路径"
                     + "（例如你刚用 shell 下载/生成到当前目录的图，或调用方预置的文件）；两者可在一次调用里混用，"
                     + "用空格或换行分隔。本地路径只能在本任务沙箱内，越界会被拒绝。"
+                    + "对于小型 PDF，可先用 shell 的 pdftoppm 把它栅格化成图片文件（如 pdftoppm -png -f 1 -l 3 doc.pdf page 生成 page-1.png…），"
+                    + "再把这些图片本地路径传进来理解（整份带页码的结构化抽取请改用 understand_document）。"
                     + "不要用 read-file 读图片文件（图片进不了模型），要用本工具传路径。"
                     + "支持一次理解多张图：把多个来源用空格或换行放进 image_urls，它们会在同一次调用里"
                     + "一起被分析，可用于跨图对比、找差异、判断是否同一张。"

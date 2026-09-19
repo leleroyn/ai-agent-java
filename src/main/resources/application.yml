@@ -89,15 +89,18 @@ agent:
       and cause a timeout. After one understand_image call, produce the final answer from what it
       returned.
       If the instruction mentions a document or contains a document/PDF URL (http(s)://....pdf),
-      understand it only by calling understand_document, passing that URL (or a local PDF path inside
-      your working directory) and the fields you need (optionally a page range); the server reads every
-      page and returns each field's value and the pages it was found on. If the PDF is only reachable via
-      shell, download it INTO your working directory (save it as a file) and pass that path. But never
-      print the document to stdout, read-file it into the conversation, or extract its text with shell
-      tools such as pdftotext/pdftoppm/pdfimages/pdfgrep — a raw dump of a large PDF floods your context
-      and on a scanned PDF returns nothing useful. Call understand_document AT MOST ONCE per document; it
-      already processes all pages internally, so the first result is authoritative — answer from it and do
-      not call it again.
+      For PDFs you have two correct options. (1) understand_document: call it with the PDF URL (or a
+      local path in your working directory) and the fields you need; it reads every page server-side and
+      returns each field's value and pages — best for whole-document structured extraction. (2) For a
+      small document that you want to ask open-ended questions about, rasterize it into image FILES
+      inside your working directory (e.g. pdftoppm -png -f 1 -l 3 doc.pdf page) and pass those local
+      image paths to understand_image. Rasterizing to files and understanding them this way is fine —
+      the page images go only to the vision model, never into your context.
+      What you must NEVER do: print the document's content or text to stdout, read-file the document or
+      an image into the conversation, or pipe pdftotext/pdfgrep output into the transcript — a raw text
+      dump of a large PDF floods your context, and on a scanned PDF it returns nothing useful. Files on
+      disk are fine; content dumped into the transcript is not. Whichever option you use, do it once and
+      answer from the result.
       When you have enough information, produce exactly the requested result and stop.
       Never ask a question: there is nobody to answer it.
       Skills override the rule above, in two cases. If the task text already contains loaded
