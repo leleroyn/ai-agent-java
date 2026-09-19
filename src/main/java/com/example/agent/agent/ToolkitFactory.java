@@ -2,10 +2,13 @@ package com.example.agent.agent;
 
 import com.example.agent.agent.PdfService;
 import com.example.agent.agent.VisionClient;
+import com.example.agent.agent.tool.DocumentExtractTools;
 import com.example.agent.agent.tool.DocumentUnderstandTools;
+import com.example.agent.agent.tool.ImageExtractTools;
 import com.example.agent.agent.tool.ImageUnderstandTools;
 import com.example.agent.agent.tool.SystemTimeTools;
 import com.example.agent.config.AgentProperties;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.agentscope.core.tool.Toolkit;
 import io.agentscope.core.tool.builtin.TodoTools;
 import io.agentscope.core.tool.coding.ShellCommandTool;
@@ -13,6 +16,7 @@ import io.agentscope.core.tool.file.ReadFileTool;
 import io.agentscope.core.tool.file.WriteFileTool;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 import java.nio.file.Path;
@@ -42,13 +46,16 @@ public class ToolkitFactory {
     private final SystemTimeTools systemTimeTools;
     private final VisionClient visionClient;
     private final PdfService pdfService;
+    private final ObjectMapper mapper;
 
     public ToolkitFactory(AgentProperties props, SystemTimeTools systemTimeTools,
-                          VisionClient visionClient, PdfService pdfService) {
+                          VisionClient visionClient, PdfService pdfService,
+                          @Qualifier("agentScopeObjectMapper") ObjectMapper mapper) {
         this.props = props;
         this.systemTimeTools = systemTimeTools;
         this.visionClient = visionClient;
         this.pdfService = pdfService;
+        this.mapper = mapper;
     }
 
     /**
@@ -88,16 +95,20 @@ public class ToolkitFactory {
             register(toolkit, systemTimeTools, "system-time", registered);
         }
 
-        // 自定义工具：图片理解。图片走独立的视觉模型（agent.vision），字节不进主模型上下文。
-        // 因需携带任务沙箱目录以支持本地文件输入，故每任务 new 一个（与文件工具同模式）。
+        // 自定义工具：图片/文档的「理解(自由问答)」与「抽取(结构化)」四个专职工具。
+        // 都走独立视觉模型（agent.vision），图片字节不进主模型上下文；都需任务沙箱目录（本地文件输入），
+        // 故均每任务 new 一个（与文件工具同模式）。
         if (t.isImageUnderstand()) {
             register(toolkit, new ImageUnderstandTools(visionClient, props, taskDir), "image-understand", registered);
         }
-
-        // 自定义工具：文档理解。针对大/多页扫描 PDF，服务端逐页栅格化后分批交给视觉模型。需要
-        // 任务沙箱放下载与临时页图，故每任务 new 一个（非常规 Spring 单例），与文件工具同模式。
+        if (t.isImageExtract()) {
+            register(toolkit, new ImageExtractTools(visionClient, props, mapper, taskDir), "image-extract", registered);
+        }
         if (t.isDocumentUnderstand()) {
             register(toolkit, new DocumentUnderstandTools(pdfService, taskDir), "document-understand", registered);
+        }
+        if (t.isDocumentExtract()) {
+            register(toolkit, new DocumentExtractTools(pdfService, taskDir), "document-extract", registered);
         }
 
         log.debug("toolkit assembled enabled={} taskDir={}", registered, base);

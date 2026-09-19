@@ -433,17 +433,23 @@ public class AgentProperties {
          */
         private boolean systemTime = true;
         /**
-         * 自定义工具：图片理解（{@code understand_image}）。默认开启。图片走独立的视觉模型
-         * （{@code agent.vision}），图片字节不进入主模型上下文；关掉后 instruction 里的图片 URL
-         * 将没有任何途径被理解。
+         * 自定义工具：图片自由理解（{@code understand_image}）。默认开启。图片走独立的视觉模型
+         * （{@code agent.vision}），图片字节不进入主模型上下文。
          */
         private boolean imageUnderstand = true;
         /**
-         * 自定义工具：文档理解（{@code understand_document}），针对大/多页扫描 PDF。
-         * 默认开启。PDF 逐页栅格化后分批交给视觉模型（{@code agent.vision}）抽取用户指定的
-         * 关键信息，图片字节不进入主模型上下文；与 {@code understand_image} 同样防循环。
+         * 自定义工具：图片字段抽取（{@code extract_image_fields}）。默认开启。结构化抽取指定字段。
+         */
+        private boolean imageExtract = true;
+        /**
+         * 自定义工具：PDF 自由理解（{@code understand_pdf}）。默认开启。读某几页/小文档做自由问答。
          */
         private boolean documentUnderstand = true;
+        /**
+         * 自定义工具：PDF 字段抽取（{@code extract_pdf_fields}）。默认开启。服务端遍历整篇、
+         * 分批并发结构化抽取、确定性归并并回页码，召回不依赖主模型分页。
+         */
+        private boolean documentExtract = true;
 
         private String workingDir = "./agent-workspace";
         /** Empty means no allowlist is configured. */
@@ -499,12 +505,28 @@ public class AgentProperties {
             this.imageUnderstand = imageUnderstand;
         }
 
+        public boolean isImageExtract() {
+            return imageExtract;
+        }
+
+        public void setImageExtract(boolean imageExtract) {
+            this.imageExtract = imageExtract;
+        }
+
         public boolean isDocumentUnderstand() {
             return documentUnderstand;
         }
 
         public void setDocumentUnderstand(boolean documentUnderstand) {
             this.documentUnderstand = documentUnderstand;
+        }
+
+        public boolean isDocumentExtract() {
+            return documentExtract;
+        }
+
+        public void setDocumentExtract(boolean documentExtract) {
+            this.documentExtract = documentExtract;
         }
 
 
@@ -668,19 +690,26 @@ public class AgentProperties {
     }
 
     /**
-     * 文档理解工具（{@code understand_document}）的配置。它是「PDF 版的图片理解」：一次把
-     * 一批页栅格化后连同自由问题交给视觉模型（{@link Vision}），返回自然语言。
+     * PDF 工具配置，服务两个工具：{@code understand_pdf}（自由问答，一批页）与
+     * {@code extract_pdf_fields}（服务端遍历整篇、分批并发结构化抽取、确定性归并）。
      *
-     * <p>不在服务端做分批/reduce：{@code pagesPerCall} 是单次调用最多处理的页数，超出时工具
-     * 会提示调用方用 {@code page_range} 分批、自行汇总（汇总交给主模型）。
+     * <p>两者都基于 {@code pdftoppm} 逐页栅格化后交给 {@link Vision}；图片字节不进主模型上下文。
+     * {@code extract_pdf_fields} 靠服务端遍历保证召回，语义总结交给主模型。
      */
     public static class Pdfs {
         private boolean enabled = true;
         /**
-         * 单次 {@code understand_document} 调用最多处理多少页。实际生效上限为
-         * {@code min(本值, agent.vision.max-images)}；超过则返回分批提示，不在服务端自动分批。
+         * 每批交给视觉模型的页数（{@code understand_pdf} 的单次上限；{@code extract_pdf_fields}
+         * 每批喂多少页）。实际上限 = {@code min(本值, agent.vision.max-images)}。
          */
         private int pagesPerCall = 6;
+        /** {@code extract_pdf_fields} 遍历整篇时的并发批数。 */
+        private int concurrency = 4;
+        /**
+         * {@code extract_pdf_fields} 服务端最多扫描多少页（召回与成本的兜底）。超过则只扫前 N 页
+         * 并在结果里标 {@code incomplete=true}，由主模型决定是否用 page_range 续扫。
+         */
+        private int maxPages = 200;
         /** 栅格化最长边像素（控 token）；0=不缩放。pdftoppm -scale-to。 */
         private int maxImageDimension = 1568;
         /** 栅格化 JPEG 质量。 */
@@ -708,6 +737,22 @@ public class AgentProperties {
 
         public void setPagesPerCall(int pagesPerCall) {
             this.pagesPerCall = Math.max(1, pagesPerCall);
+        }
+
+        public int getConcurrency() {
+            return concurrency;
+        }
+
+        public void setConcurrency(int concurrency) {
+            this.concurrency = Math.max(1, concurrency);
+        }
+
+        public int getMaxPages() {
+            return maxPages;
+        }
+
+        public void setMaxPages(int maxPages) {
+            this.maxPages = Math.max(1, maxPages);
         }
 
         public int getMaxImageDimension() {
