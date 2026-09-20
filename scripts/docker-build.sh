@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 # 打版本镜像：本机 Maven 编译 fat jar -> docker build -> 打版本号 / latest / commit 三个 tag。
 #
-#   bash scripts/docker-build.sh                    # 完整流程：编译 + 构建镜像
+#   bash scripts/docker-build.sh                    # 编译 jar + FROM 基础镜像打应用镜像（秒级，不跑 apt）
 #   SKIP_BUILD=1 bash scripts/docker-build.sh       # 复用已有 target/*.jar
 #   IMAGE_REPO=myreg.local:5000/ai-agent-java bash scripts/docker-build.sh
 #   PUSH=1 IMAGE_REPO=myreg.local:5000/ai-agent-java bash scripts/docker-build.sh
-#   NO_CACHE=1 bash scripts/docker-build.sh         # apt 层也重建
-#   OVERLAY=1 SKIP_BUILD=1 bash scripts/docker-build.sh   # 快路径:在已有镜像上只换 jar, 秒级
-#     适合只改 Java 代码的迭代。基座默认取 ${IMAGE_REPO}:latest(可用 OVERLAY_BASE 指定)，
-#     需先做过一次完整构建。每次会往上叠一层 jar，定期做一次完整构建以收敛层数/刷新标签。
+#
+# 环境层（JDK+Python+apt 工具）已拆到基础镜像 ai-agent-base（见 Dockerfile.base / docker-build-base.sh）。
+# 首次或增删系统工具时先构建基础镜像：bash scripts/docker-build-base.sh。日常改 Java 代码不碰 apt。
+#   BASE_VERSION=1.1 ...                # 指定所依赖的基础镜像版本（需与基础镜像一致）
+#   BASE_IMAGE=ai-agent-base:1.0 ...     # 直接指定基础镜像引用
+#   NO_CACHE=1 ...                       # 强制重建应用层（基础镜像层仍走缓存）
+#   OVERLAY=1 SKIP_BUILD=1 ...           # 遗留快路径：在已有应用镜像上只换 jar。拆分基础镜像后已很少需要。
 #
 # 版本号取自 pom.xml 的 <version>（跳过 <parent> 块）。git commit 取不到时记 unknown，
 # 不阻断构建——本项目当前尚未初始化 git，这是预期情况。
@@ -20,8 +23,9 @@ PUSH="${PUSH:-0}"
 NO_CACHE="${NO_CACHE:-0}"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 OVERLAY="${OVERLAY:-0}"
-APT_MIRROR="${APT_MIRROR:-mirrors.aliyun.com}"
-BASE_IMAGE="${BASE_IMAGE:-docker.m.daocloud.io/library/eclipse-temurin:17-jre-noble}"
+# 应用镜像 FROM 的基础镜像（环境层）。与 docker-build-base.sh 的 BASE_VERSION 保持一致。
+BASE_VERSION="${BASE_VERSION:-1.0}"
+BASE_IMAGE="${BASE_IMAGE:-ai-agent-base:${BASE_VERSION}}"
 
 # pom <version>：跳过 <parent> 块，取项目自身版本。
 VERSION="$(awk '/<parent>/{p=1} /<\/parent>/{p=0}
@@ -44,7 +48,6 @@ echo "==> version    : $VERSION"
 echo "==> git commit : $GIT_COMMIT"
 echo "==> build time : $BUILD_TIME"
 echo "==> base image : $BASE_IMAGE"
-echo "==> apt mirror : $APT_MIRROR"
 
 if [ "$SKIP_BUILD" != "1" ]; then
   echo "==> 编译 jar（本机 Maven + 内网 Nexus）"
@@ -67,6 +70,13 @@ if [ ! -f "$JAR" ]; then
   exit 1
 fi
 
+# 非 OVERLAY 构建 FROM 基础镜像；先确保基础镜像已在本地，否则给出可操作的提示而非 docker 底层错。
+if [ "$OVERLAY" != "1" ] && ! docker image inspect "$BASE_IMAGE" >/dev/null 2>&1; then
+  echo "ERROR: 找不到基础镜像 $BASE_IMAGE。应用镜像 FROM 它，请先构建：" >&2
+  echo "         bash scripts/docker-build-base.sh   # 或从离线包 docker load 后再试" >&2
+  exit 1
+fi
+
 # 只放行 jar 进上下文（.dockerignore 已排除 .env 等敏感文件），构建上下文应远小于仓库体积。
 echo "==> 构建上下文（排除 .env/源码/文档后）："
 if command -v du >/dev/null 2>&1; then
@@ -78,7 +88,6 @@ BUILD_ARGS=(
   --build-arg "GIT_COMMIT=${GIT_COMMIT}"
   --build-arg "BUILD_TIME=${BUILD_TIME}"
   --build-arg "JAR_FILE=${JAR}"
-  --build-arg "APT_MIRROR=${APT_MIRROR}"
   --build-arg "BASE_IMAGE=${BASE_IMAGE}"
   -t "${IMAGE_REPO}:${VERSION}"
   -t "${IMAGE_REPO}:latest"

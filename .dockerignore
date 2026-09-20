@@ -28,8 +28,10 @@ docs
 scripts
 tmp-test
 logs
+dist
 *.log
 *.md
 Dockerfile
+Dockerfile.base
 docker-compose.yml
 .dockerignore

@@ -1,0 +1,107 @@
+# 注意：这里刻意不写 `# syntax=docker/dockerfile:1`。那一行会让 BuildKit 去
+# docker.io 拉 dockerfile frontend，而本机构建环境访问不了 auth.docker.io（实测超时），
+# 用内置 frontend 即可。
+#
+# ai-agent-java 的「环境基础镜像」：JDK 17 + 完整 Python 3 环境 + agent 常用 shell 工具集 + 运行用户。
+#
+# 这一层几乎不变，只有增删系统工具/Python 库时才重建；日常改 Java 代码用
+# Dockerfile（FROM 本镜像 + COPY jar），秒级完成。
+#
+# 构建（推荐用脚本，会自动带 tag、可选导出离线包）：
+#   bash scripts/docker-build-base.sh                # 构建并打 ai-agent-base:<BASE_VERSION> + :latest
+#   SAVE=1 bash scripts/docker-build-base.sh         # 另存离线包 dist/ai-agent-base-<ver>.tar.gz
+#   PUSH=1 IMAGE_REPO=myreg.local:5000/ai-agent-base bash scripts/docker-build-base.sh
+#
+# 为什么镜像里要装这么多命令：agent 的 shell 工具**就在本容器内执行**。缺 curl/grep/jq/python3
+# 不是"少个功能"，而是依赖它的任务直接失败——模型无法绕过不存在的二进制，只会反复试错、
+# 白烧任务时间预算。所以按 agent 实际会用的命令一次性备齐。
+#
+# 为什么 apt 只放这里、不放应用镜像：apt 层依赖外网、耗时且很少变动。把它固化成基础镜像后，
+# 应用镜像构建只剩 COPY jar，不再触发 apt；这正是"每次构建都快"的关键。
+
+ARG BASE_IMAGE=docker.m.daocloud.io/library/eclipse-temurin:17-jre-noble
+FROM ${BASE_IMAGE}
+
+ARG BASE_IMAGE
+ARG BASE_VERSION=0.0.0-unknown
+ARG APT_MIRROR=mirrors.aliyun.com
+ARG APP_UID=10001
+ARG APP_GID=10001
+
+# ---------- 语言与时区 ----------
+# LANG/LC_ALL 必须是 UTF-8：否则 shell 命令输出的中文在日志和接口返回里都是乱码。C.UTF-8 无需 locale-gen。
+# TZ 影响的不只是 date 输出：模型判断"今天几号"依赖进程时区。
+ENV LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    TZ=Asia/Shanghai
+
+# ---------- Python 行为 ----------
+# PYTHONUNBUFFERED：agent 常用 `python x.py | grep` 之类的管道，缓冲会让输出丢失或迟到。
+# PIP_BREAK_SYSTEM_PACKAGES：Ubuntu 24.04 有 PEP 668 保护，不设则容器内 `pip install` 直接报错。
+# PIP_INDEX_URL：默认走国内镜像；部署环境若无公网，用 --build-arg 覆盖或留空走官方源。
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_BREAK_SYSTEM_PACKAGES=1 \
+    PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+
+# ---------- 系统依赖与工具集 ----------
+# 用 --no-install-recommends：python3-pandas 的 Recommends 会拖进 matplotlib 等数百 MB，
+# 而 agent 处理表格只需要 pandas 本身。
+RUN set -eux; \
+    # Ubuntu 24.04 用 deb822 格式的源文件（不再是 /etc/apt/sources.list）。
+    # 纯内网构建时把 APT_MIRROR 换成内网 apt 镜像地址即可。
+    if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then \
+        sed -i \
+          -e "s|http://archive.ubuntu.com/ubuntu/|https://${APT_MIRROR}/ubuntu/|g" \
+          -e "s|http://security.ubuntu.com/ubuntu/|https://${APT_MIRROR}/ubuntu/|g" \
+          /etc/apt/sources.list.d/ubuntu.sources; \
+    fi; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        # 基础：证书（curl/https 与 JDBC TLS）、时区数据
+        ca-certificates tzdata \
+        # 网络与诊断：agent 抓远程文件、排查连通性问题
+        curl wget iputils-ping iputils-tracepath dnsutils \
+        # 进程与磁盘（排查用，也给 agent 提供 ps/df）
+        procps psmisc util-linux \
+        # 文本处理：agent 最高频的一组命令
+        grep sed gawk mawk jq ripgrep fd-find findutils diffutils patch dos2unix \
+        # 文件与归档
+        tar gzip bzip2 xz-utils zstd zip unzip file tree rsync \
+        # 计算与编辑
+        bc moreutils less nano vim-tiny \
+        # 版本控制与传输（agent 会 clone 仓库、拉配置）
+        git openssh-client openssl \
+        # Python 3 完整环境：解释器 + pip + venv + 头文件（能现场编译 C 扩展）
+        python3 python3-pip python3-venv python3-dev python3-setuptools \
+        python-is-python3 \
+        # 常用 Python 库走 apt 预编译包：构建期不依赖 PyPI，比 pip 装更快更稳
+        python3-numpy python3-pandas python3-requests python3-yaml \
+        python3-dateutil python3-tabulate python3-openpyxl \
+        python3-lxml python3-bs4 \
+        # PDF 处理：pdftoppm/pdfinfo，供 understand_pdf / extract_pdf_fields 逐页栅格化扫描版 PDF
+        poppler-utils \
+    ; \
+    ln -sf "/usr/share/zoneinfo/${TZ}" /etc/localtime; \
+    dpkg-reconfigure -f noninteractive tzdata >/dev/null 2>&1 || true; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/*
+
+# ---------- 用户与工作目录 ----------
+# 非 root 运行。真正的安全边界是容器 + 每任务独立子目录（文件工具被框架限制在
+# <working-dir>/<taskId> 内），不是 OS 用户；但非 root 仍能挡住"容器内横向写系统目录"。
+# /workspace  任务工作区（可写，部署时挂 named volume），每任务一个子目录
+# /skills     技能目录（只读，部署时 bind-mount 宿主机 agent-skills）
+RUN groupadd --gid "${APP_GID}" appgroup \
+    && useradd --create-home --uid "${APP_UID}" --gid "${APP_GID}" appuser \
+    && mkdir -p /workspace /skills \
+    && chown appuser:appgroup /workspace
+
+WORKDIR /workspace
+
+# 基础镜像元信息。改基础镜像内容时才会重建，这些标签也随之刷新。
+LABEL org.opencontainers.image.title="ai-agent-base" \
+      org.opencontainers.image.description="Runtime base for ai-agent-java: JDK17 + Python3 + agent shell tools (poppler included)" \
+      org.opencontainers.image.version="${BASE_VERSION}" \
+      org.opencontainers.image.base.name="${BASE_IMAGE}"
