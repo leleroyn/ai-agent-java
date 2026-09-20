@@ -49,6 +49,10 @@ public class ModelFactory {
                 .baseUrl(m.getBaseUrl())
                 .apiKey(m.getApiKey())
                 .modelName(m.getName())
+                // 本应用只 block() 取最终 Msg，不需要流式；框架默认 stream=true 会逐块打 SSE 日志、
+                // 且每个模型调用走一次长连接。显式关掉：单次非流式请求，日志干净。（builder 字段在
+                // merge 时优先于 GenerateOptions，所以必须在这里设，光改 generateOptions 无效。）
+                .stream(false)
                 .nativeStructuredOutput(m.isNativeStructuredOutput())
                 .nativeStructuredOutputWithTools(nativeWithTools);
 

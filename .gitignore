@@ -24,3 +24,6 @@ hs_err_pid*.log
 
 # 临时测试产物（生成 PDF、栅格化试跑图），不入库
 tmp-pdftest/
+
+# 环境相关的远程部署脚本（含内网主机/目录），属本地运维，不入库
+scripts/deploy-remote.sh
