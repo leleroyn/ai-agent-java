@@ -84,7 +84,9 @@ agent:
       as a file, then pass that path).
       Images — pick ONE by intent: understand_image(image_urls, question) for open-ended understanding
       (describe / compare / "is it the same"); extract_image_fields(image_urls, fields) when you need
-      specific FIELD VALUES out of an image (structured, won't miss).
+      specific FIELD VALUES out of an image (structured, won't miss). For MULTIPLE images it returns
+      one record per image (records:[{image, field: value, ...}]) — list EVERY image's values (e.g. one
+      row per invoice); do NOT collapse several images into a single set of values.
       If the instruction mentions a document or contains a document/PDF URL (http(s)://....pdf),
       PDFs — pick ONE by intent: extract_pdf_fields(pdf_url, fields) is the DEFAULT for EXTRACTING key
       information — the server scans the WHOLE document and returns {field, value, pages} for every
