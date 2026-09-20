@@ -331,25 +331,19 @@ curl -X POST http://localhost:8080/api/v1/agent/task \
 
 `GET /tools`
 
-返回当前**每个任务会注册的工具**（即模型实际可见的能力），反映 `agent.tools.*` 的实时开关。运维用它确认 shell、读写文件、图片/PDF 理解与抽取、系统时间等能力是否开启。
+返回**本项目自定义的工具**（不含框架内置的 shell / 读写文件 / 列目录 / todo），反映 `agent.tools.*` 的实时开关。运维用它确认自定义能力（系统时间 + 图片/PDF 理解与抽取）是否开启。
 
-全部开关默认开启时，实测返回 11 个工具：
+默认开关全开时，返回 5 个自定义工具：
 
 ```json
 {
   "code": 0,
   "data": [
-    { "name": "execute_shell_command", "description": "Execute a shell command ……" },
     { "name": "extract_image_fields", "description": "从图片里结构化抽取指定字段……" },
     { "name": "extract_pdf_fields", "description": "从 PDF 文档整篇抽取指定关键信息并定位页码……" },
     { "name": "get_system_time", "description": "获取服务器当前日期和时间……" },
-    { "name": "insert_text_file", "description": "……" },
-    { "name": "list_directory", "description": "……" },
-    { "name": "todo_write", "description": "……" },
     { "name": "understand_image", "description": "对图片做自由理解/问答……" },
-    { "name": "understand_pdf", "description": "对 PDF 做自由理解/问答……" },
-    { "name": "view_text_file", "description": "……" },
-    { "name": "write_text_file", "description": "……" }
+    { "name": "understand_pdf", "description": "对 PDF 做自由理解/问答……" }
   ]
 }
 ```
@@ -357,8 +351,8 @@ curl -X POST http://localhost:8080/api/v1/agent/task \
 说明：
 
 - `name` 是模型调用时用的工具名，`description` 是用途说明——两者都取自**真正装配出来的工具 schema**，与运行时完全一致，不是另写的一份清单。
-- 列表随 `agent.tools.*` 配置变化：关掉某个开关（如 `AGENT_TOOL_IMAGE_EXTRACT=false`），对应工具就不再出现。
-- 内置工具的真实名字由框架定义（shell 为 `execute_shell_command`，文件为 `view_text_file`/`write_text_file`/`insert_text_file`/`list_directory`，待办为 `todo_write`）；自定义工具名为 `understand_image`/`extract_image_fields`/`understand_pdf`/`extract_pdf_fields`/`get_system_time`。
+- 只列自定义工具：`get_system_time`、`understand_image`、`extract_image_fields`、`understand_pdf`、`extract_pdf_fields`。框架内置的 `execute_shell_command`/`view_text_file`/`write_text_file`/`insert_text_file`/`list_directory`/`todo_write` **不在此列**。
+- 列表随 `agent.tools.*` 开关变化：关掉某个开关（如 `AGENT_TOOL_IMAGE_EXTRACT=false`），对应自定义工具就不再出现；四个媒体开关全关时返回空数组。
 
 ---
 

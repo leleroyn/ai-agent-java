@@ -27,7 +27,7 @@ import java.util.Optional;
  * POST   /api/v1/agent/task          submit a task
  * GET    /api/v1/agent/task/{id}     poll status and result
  * DELETE /api/v1/agent/task/{id}     cancel a queued or running task
- * GET    /api/v1/agent/tools         tools currently registered for a task (name + description)
+ * GET    /api/v1/agent/tools         this project's custom tools (name + description)
  * GET    /api/v1/agent/skills        installed skill names
  * GET    /api/v1/agent/health        queue occupancy and liveness
  * </pre>
@@ -118,9 +118,9 @@ public class AgentController {
     }
 
     /**
-     * The tools currently registered for a task, as the model sees them ({@code name} +
-     * {@code description}). Reflects the live {@code agent.tools.*} config; useful for operators
-     * to confirm which capabilities (shell, file tools, media understand/extract, time) are on.
+     * This project's <b>custom</b> tools (system time + the four media understand/extract tools),
+     * as the model sees them ({@code name} + {@code description}). Reflects the live
+     * {@code agent.tools.*} config. Framework built-ins (shell / file / todo) are excluded.
      */
     @GetMapping("/tools")
     public ApiResponse<List<Map<String, Object>>> tools() {

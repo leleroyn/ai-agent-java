@@ -67,12 +67,22 @@ public class ToolkitFactory {
      *                file tools are sandboxed to it
      */
     public Toolkit build(Path taskDir) {
+        return build(taskDir, true);
+    }
+
+    /**
+     * @param includeBuiltins when {@code false}, skip the framework built-in tools (shell, read/write
+     *                        file, list dir, todo) and register only this project's own tools. Used
+     *                        by {@link #registeredTools()} so the endpoint reports the custom tools,
+     *                        not the stock AgentScope ones.
+     */
+    public Toolkit build(Path taskDir, boolean includeBuiltins) {
         AgentProperties.Tools t = props.getTools();
         String base = taskDir.toAbsolutePath().normalize().toString();
         Toolkit toolkit = new Toolkit();
         List<String> registered = new ArrayList<>();
 
-        if (t.isShell()) {
+        if (includeBuiltins && t.isShell()) {
             // Three-arg form binds the shell's working directory to this task's sandbox.
             ShellCommandTool shell = new ShellCommandTool(base, new HashSet<>(t.getShellAllowedCommands()), null);
             for (String command : t.getShellAllowedCommands()) {
@@ -82,13 +92,13 @@ public class ToolkitFactory {
             }
             register(toolkit, shell, "shell", registered);
         }
-        if (t.isReadFile()) {
+        if (includeBuiltins && t.isReadFile()) {
             register(toolkit, new ReadFileTool(base), "read-file", registered);
         }
-        if (t.isWriteFile()) {
+        if (includeBuiltins && t.isWriteFile()) {
             register(toolkit, new WriteFileTool(base), "write-file", registered);
         }
-        if (t.isTodo()) {
+        if (includeBuiltins && t.isTodo()) {
             register(toolkit, new TodoTools(), "todo", registered);
         }
 
@@ -120,9 +130,11 @@ public class ToolkitFactory {
     }
 
     /**
-     * The tools that would be registered for a task right now, as the model sees them: each
-     * {@code {name, description}} comes straight from the assembled {@link Toolkit} schemas, so
-     * this reflects the live {@code agent.tools.*} config rather than a separate list.
+     * The <b>custom</b> tools this project registers (system time + the four media
+     * understand/extract tools), as the model sees them: each {@code {name, description}} comes
+     * straight from the assembled {@link Toolkit} schemas, so this reflects the live
+     * {@code agent.tools.*} config. Framework built-ins (shell / read-write file / list dir / todo)
+     * are intentionally excluded.
      *
      * <p>Built against a throwaway probe directory (the configured working-dir root); tool names
      * and descriptions do not depend on the per-task sandbox, and constructing the tools only
@@ -130,7 +142,9 @@ public class ToolkitFactory {
      */
     public List<Map<String, Object>> registeredTools() {
         Path probe = Path.of(props.getTools().getWorkingDir()).toAbsolutePath().normalize();
-        Toolkit toolkit = build(probe);
+        // includeBuiltins=false：只列本项目自定义的工具（system-time + 4 个媒体工具），
+        // 不含框架内置的 shell / 读写文件 / 列目录 / todo。
+        Toolkit toolkit = build(probe, false);
         List<Map<String, Object>> out = new ArrayList<>();
         for (ToolSchema schema : toolkit.getToolSchemas()) {
             Map<String, Object> entry = new LinkedHashMap<>();
