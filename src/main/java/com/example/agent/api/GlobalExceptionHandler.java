@@ -10,6 +10,7 @@ import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 /**
  * Wraps every failure in the standard {@link ApiResponse} envelope.
@@ -55,6 +56,18 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(HttpMessageNotReadableException.class)
     public ResponseEntity<ApiResponse<Void>> handleUnreadable(HttpMessageNotReadableException e) {
         return rejection("request body must be valid JSON");
+    }
+
+    /**
+     * Unknown or removed endpoint. This is a routing miss, not a server fault, so it answers
+     * HTTP 404 (which still means something to infrastructure) with {@link ApiCodes#NOT_FOUND}
+     * rather than falling through to the catch-all below as a misleading {@code 9999}/500.
+     */
+    @ExceptionHandler(NoResourceFoundException.class)
+    public ResponseEntity<ApiResponse<Void>> handleNoResource(NoResourceFoundException e) {
+        log.info("unknown endpoint: {}", e.getResourcePath());
+        return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                .body(ApiResponse.error(ApiCodes.NOT_FOUND, "no such endpoint"));
     }
 
     @ExceptionHandler(Exception.class)

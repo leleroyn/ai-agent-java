@@ -20,6 +20,9 @@ public final class ApiCodes {
     /** Body rejected: blank or oversized fields, bad taskId, unknown skill name, unparsable JSON. */
     public static final int INVALID_REQUEST = 1001;
 
+    /** No handler is mapped for this path — a mistyped or removed endpoint. Answered HTTP 404. */
+    public static final int NOT_FOUND = 1002;
+
     /** No task with that id. */
     public static final int TASK_NOT_FOUND = 2001;
 
