@@ -71,6 +71,8 @@ seals = r.json()   # list[dict]：confidence / seal_type / ocr_result（无 base
 - **`return_ocr_text=true` 必须带**，否则拿不到 `ocr_result` 公司名；但它会明显变慢（每枚印章额外一次大模型推理）。
 - **`return_seal_image=false` 固定带**，避免大 base64 占满上下文。若确需印章裁剪图，才去掉该参数（默认会返回）。
 - **OCR 可能只读出局部字样**（例如只识别出"云南省"、或残缺的公司名），`ocr_result` 不可尽信；需要准确公司名时请结合原图人工复核，或改用 `extract_image_fields`（结构化抽字段）交叉核对。
-- **PDF 会逐页检测**，结果按页顺序拼在同一个数组里。
+- **识别印章优先用本接口**，不要用 `extract_image_fields`/`understand_image` 代替——通用图片工具给不出印章置信度/类型/检测数量。
+- **每个文件单独调用**：接口一次只处理一个文件；多图请逐张调用再按图汇总。
+- **PDF 会逐页检测**，结果按页顺序拼在同一个数组里（不区分来自哪一页，需要时自行按页拆）。
 - **错误响应是纯文本不是 JSON**：非 200 时（如 400）直接读响应体文本作为错误信息；解析前先判断 `r.status_code == 200` 再 `json.loads`。
 - 建议 `timeout` 给 120s 以上（PDF 页数多时更久）。
