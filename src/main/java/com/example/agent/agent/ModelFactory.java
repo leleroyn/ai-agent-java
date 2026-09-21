@@ -7,7 +7,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
+import java.util.LinkedHashMap;
 import java.util.Locale;
+import java.util.Map;
 
 /**
  * Builds the OpenAI-compatible chat model against the configured endpoint.
@@ -70,6 +72,14 @@ public class ModelFactory {
         String effort = m.getReasoningEffort();
         if (effort != null && !effort.isBlank()) {
             go.reasoningEffort(effort.trim().toLowerCase(Locale.ROOT));
+        }
+        // llama.cpp 的 OpenAI 接口不认 OpenAI 的 reasoning_effort 参数：Qwen3 关思考必须走
+        // 顶层 chat_template_kwargs:{"enable_thinking":false}。与 reasoning-effort=none 联动——
+        // effort=none 时额外发该参数（对不认此参数的后端无害，会被忽略）。
+        if (effort != null && "none".equalsIgnoreCase(effort.trim())) {
+            Map<String, Object> kwargs = new LinkedHashMap<>();
+            kwargs.put("enable_thinking", false);
+            go.additionalBodyParam("chat_template_kwargs", kwargs);
         }
         builder.generateOptions(go.build());
 
