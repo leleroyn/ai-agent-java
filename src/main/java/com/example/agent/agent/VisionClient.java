@@ -271,6 +271,16 @@ public class VisionClient {
         if (v.getTemperature() != null) {
             root.put("temperature", v.getTemperature());
         }
+        // 视觉推理强度：非空则按 OpenAI reasoning_effort 下发；"none" 时额外补
+        // chat_template_kwargs.enable_thinking=false——llama.cpp 不认 reasoning_effort，
+        // Qwen3 关思考要靠该 kwargs（与主模型 ModelFactory 同一做法）；后端不支持时会被忽略。
+        String effort = v.getReasoningEffort();
+        if (effort != null && !effort.isBlank()) {
+            root.put("reasoning_effort", effort.trim().toLowerCase(java.util.Locale.ROOT));
+            if ("none".equalsIgnoreCase(effort.trim())) {
+                root.putObject("chat_template_kwargs").put("enable_thinking", false);
+            }
+        }
         ArrayNode messages = root.putArray("messages");
         ObjectNode msg = messages.addObject();
         msg.put("role", "user");

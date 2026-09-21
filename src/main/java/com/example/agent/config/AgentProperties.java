@@ -195,6 +195,8 @@ public class AgentProperties {
         private int timeoutSeconds = 120;
         /** 视觉模型采样温度；理解类任务默认 0 求稳定。 */
         private Double temperature = 0.0;
+        /** 视觉模型推理强度：{@code "none"} 关闭思考（llama.cpp 经 chat_template_kwargs.enable_thinking 生效）；空=不下发该参数。 */
+        private String reasoningEffort = "none";
 
         public boolean isEnabled() {
             return enabled;
@@ -258,6 +260,14 @@ public class AgentProperties {
 
         public void setTemperature(Double temperature) {
             this.temperature = temperature;
+        }
+
+        public String getReasoningEffort() {
+            return reasoningEffort;
+        }
+
+        public void setReasoningEffort(String reasoningEffort) {
+            this.reasoningEffort = reasoningEffort;
         }
     }
 
