@@ -141,13 +141,20 @@ public class AgentController {
 
     @GetMapping("/health")
     public ApiResponse<Map<String, Object>> health() {
+        // 展示默认 profile 对应的实际模型名；配置缺失也不让 health 挂掉（退回 profile 名本身）。
+        String defaultModel;
+        try {
+            defaultModel = props.resolveModel(null).getName();
+        } catch (Exception e) {
+            defaultModel = props.getDefaultModel();
+        }
         return ApiResponse.ok(Map.of(
                 "active", service.activeCount(),
                 "queued", service.queuedCount(),
                 "maxConcurrent", props.getExecution().getMaxConcurrent(),
                 "maxQueuedTasks", props.getExecution().getMaxQueuedTasks(),
                 "workerId", service.workerId(),
-                "model", props.getModel().getName(),
+                "model", defaultModel,
                 "permissionMode", props.getRunner().getPermissionMode()));
     }
 }

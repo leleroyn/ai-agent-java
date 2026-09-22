@@ -93,6 +93,18 @@ public class AgentTaskService {
                             + inlineCap + " (agent.skills.max-inline-chars); select fewer skills",
                     false);
         }
+        // Resolve the main-model profile now: absent → configured default; unknown name → reject
+        // rather than silently falling back (a typo must not quietly downgrade flash to pro or vice
+        // versa). resolveModel throws IllegalArgumentException on an unknown profile.
+        String modelName =
+                (request.model() == null || request.model().isBlank())
+                        ? props.getDefaultModel() : request.model().trim();
+        try {
+            props.resolveModel(modelName);
+        } catch (IllegalArgumentException e) {
+            throw new AgentException(ErrorCodes.INVALID_REQUEST,
+                    "invalid 'model': " + e.getMessage(), false);
+        }
 
         TaskRecord candidate = new TaskRecord();
         candidate.setTaskId(taskId);
@@ -104,6 +116,8 @@ public class AgentTaskService {
         candidate.setTimeoutSeconds((int) budget.toSeconds());
         // Persisted so a task claimed after a restart still sees the same skill selection.
         candidate.setSkillNames(skills.isEmpty() ? null : String.join(",", skills));
+        // Persisted so a task claimed after a restart still runs on the same model profile.
+        candidate.setModelName(modelName);
         candidate.setCreatedAt(Instant.now());
 
         boolean created = store.insertIfAbsent(candidate);

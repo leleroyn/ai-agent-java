@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS agent_task (
     business_meta  LONGTEXT     NULL     COMMENT 'caller metadata, opaque passthrough',
     timeout_seconds INT         NOT NULL DEFAULT 120 COMMENT 'clamped per-task budget; must survive a restart',
     skill_names      VARCHAR(512) NULL   COMMENT 'comma-separated selected skill names; NULL = all installed skills',
+    model_name       VARCHAR(64)  NULL   COMMENT 'main-model profile for this task (flash|pro); NULL = default at run time',
 
     -- result
     result_json    LONGTEXT     NULL     COMMENT 'structured result when output_schema present',

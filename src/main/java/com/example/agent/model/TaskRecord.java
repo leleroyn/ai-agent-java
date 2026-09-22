@@ -18,6 +18,8 @@ public class TaskRecord {
     private Integer attempt;
     /** Comma-separated skill names selected for this task; null means "all installed skills". */
     private String skillNames;
+    /** main-model profile used for this task (flash / pro); null = default at run time. */
+    private String modelName;
 
     private String resultJson;
     private String resultText;
@@ -98,6 +100,14 @@ public class TaskRecord {
 
     public void setSkillNames(String skillNames) {
         this.skillNames = skillNames;
+    }
+
+    public String getModelName() {
+        return modelName;
+    }
+
+    public void setModelName(String modelName) {
+        this.modelName = modelName;
     }
 
     public String getResultJson() {

@@ -75,13 +75,14 @@ public class AgentTaskRunner {
      * @param instruction natural-language instruction
      * @param schema      caller JSON Schema, or null for free-text output
      * @param skills      skill names to expose, or empty for every installed skill
+     * @param modelName   main-model profile to use (flash / pro); null/blank = default
      * @param budget      wall-clock limit including tool execution
      * @throws AgentException on timeout, interruption, or agent failure
      */
     public RunOutcome run(String taskId, String instruction, JsonNode schema,
-                          List<String> skills, Duration budget) {
+                          List<String> skills, Duration budget, String modelName) {
         Path taskDir = workspaceFactory.create(taskId);
-        ReActAgent agent = newAgent(taskDir, skills);
+        ReActAgent agent = newAgent(taskDir, skills, modelName);
         RuntimeContext ctx = RuntimeContext.builder()
                 .sessionId("task-" + taskId)
                 .userId("agent-service")
@@ -97,7 +98,7 @@ public class AgentTaskRunner {
 
         List<Msg> messages = List.of(new UserMessage(prompt));
 
-        AgentProperties.StructuredOutputMode mode = props.getModel().getStructuredOutputMode();
+        AgentProperties.StructuredOutputMode mode = props.resolveModel(modelName).getStructuredOutputMode();
         // TWO_PHASE / OFF：第一趟不带 schema 跑，让 understand_image 等工具能正常调用
         // （带 schema 时 llama.cpp 会因 response_format 语法约束抑制工具调用）。TWO_PHASE 再补
         // 一次不带 tools 的文本→JSON 结构化调用；OFF 只兜底解析回复文本里的 JSON。
@@ -117,7 +118,7 @@ public class AgentTaskRunner {
         String text = safeText(reply);
         JsonNode result;
         if (mode == AgentProperties.StructuredOutputMode.TWO_PHASE && schema != null) {
-            result = structuredConverter.toStructured(text, schema);
+            result = structuredConverter.toStructured(text, schema, modelName);
         } else {
             result = extractStructured(reply, schema);
         }
@@ -129,7 +130,7 @@ public class AgentTaskRunner {
         return new RunOutcome(result, text, reply.getUsage(), taskDir);
     }
 
-    private ReActAgent newAgent(Path taskDir, List<String> skills) {
+    private ReActAgent newAgent(Path taskDir, List<String> skills, String modelName) {
         AgentProperties.Runner runner = props.getRunner();
         PermissionMode mode;
         try {
@@ -141,7 +142,7 @@ public class AgentTaskRunner {
         ReActAgent.Builder builder = ReActAgent.builder()
                 .name(runner.getName())
                 .sysPrompt(runner.getSysPrompt())
-                .model(modelFactory.build())
+                .model(modelFactory.build(modelName))
                 .toolkit(toolkitFactory.build(taskDir))
                 .permissionContext(PermissionContextState.builder().mode(mode).build())
                 .maxIters(runner.getMaxIters());

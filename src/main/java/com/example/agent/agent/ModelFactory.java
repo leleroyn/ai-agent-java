@@ -35,9 +35,11 @@ public class ModelFactory {
         this.props = props;
     }
 
-    /** A fresh model instance per task keeps per-task options independent and cheap. */
-    public OpenAIChatModel build() {
-        AgentProperties.Model m = props.getModel();
+    /**
+     * 按所选 profile 建模型（每个任务一个、互不干扰）。{@code modelName} 为空→用默认 profile。
+     */
+    public OpenAIChatModel build(String modelName) {
+        AgentProperties.Model m = props.resolveModel(modelName);
 
         // 按结构化输出策略解析原生开关；TWO_PHASE/OFF 下 schema 不传给 agent，withTools 无关，置 false 保险。
         boolean nativeWithTools;

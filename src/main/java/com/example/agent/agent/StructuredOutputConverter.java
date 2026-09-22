@@ -56,11 +56,11 @@ public class StructuredOutputConverter {
      * @param schema 调用方 JSON Schema
      * @return 解析后的 JSON（object/array）；端点异常、空返回或非 JSON 时返回 {@code null}
      */
-    public JsonNode toStructured(String text, JsonNode schema) {
+    public JsonNode toStructured(String text, JsonNode schema, String modelName) {
         if (text == null || text.isBlank() || schema == null) {
             return null;
         }
-        AgentProperties.Model m = props.getModel();
+        AgentProperties.Model m = props.resolveModel(modelName);
         try {
             byte[] body = buildRequest(m, text, schema);
             HttpRequest req = HttpRequest

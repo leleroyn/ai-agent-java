@@ -18,6 +18,9 @@ import tools.jackson.databind.JsonNode;
  * @param skills       optional skill names to expose to this task. Absent means every installed
  *                     skill is visible; an unknown name is rejected at submit time rather than
  *                     silently ignored.
+ * @param model        main-model profile to use ({@code flash} / {@code pro}). Absent means the
+ *                     configured default ({@code agent.default-model}); an unknown name is
+ *                     rejected at submit time rather than silently falling back.
  * @param options      per-task overrides
  * @param metadata     opaque business context, size-checked only, never interpreted
  */
@@ -26,6 +29,7 @@ public record AgentTaskRequest(
         @NotBlank(message = "instruction must not be blank") String instruction,
         JsonNode outputSchema,
         java.util.List<String> skills,
+        String model,
         Options options,
         JsonNode metadata) {
 

@@ -194,7 +194,7 @@ public class TaskPoller implements DisposableBean {
             }
 
             AgentTaskRunner.RunOutcome outcome = runner.run(taskId, task.getInstruction(),
-                    schema, splitSkills(task.getSkillNames()), budget);
+                    schema, splitSkills(task.getSkillNames()), budget, task.getModelName());
 
             long durationMs = System.currentTimeMillis() - startMillis;
             Long inputTokens = null;

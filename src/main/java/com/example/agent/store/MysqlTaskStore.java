@@ -36,7 +36,7 @@ public class MysqlTaskStore implements TaskStore {
     private static final int REAP_BATCH = 200;
 
     private static final String COLUMNS = """
-            task_id, status, instruction, output_schema, business_meta, timeout_seconds, skill_names,
+            task_id, status, instruction, output_schema, business_meta, timeout_seconds, skill_names, model_name,
             result_json, result_text, error_code, error_message, retryable,
             input_tokens, output_tokens, total_tokens, duration_ms, attempt,
             created_at, started_at, completed_at, updated_at
@@ -58,6 +58,7 @@ public class MysqlTaskStore implements TaskStore {
         r.setTimeoutSeconds(readInt(rs, "timeout_seconds"));
         r.setAttempt(readInt(rs, "attempt"));
         r.setSkillNames(rs.getString("skill_names"));
+        r.setModelName(rs.getString("model_name"));
         r.setResultJson(rs.getString("result_json"));
         r.setResultText(rs.getString("result_text"));
         r.setErrorCode(rs.getString("error_code"));
@@ -99,8 +100,8 @@ public class MysqlTaskStore implements TaskStore {
         String sql = """
                 INSERT IGNORE INTO agent_task (
                     task_id, status, instruction, output_schema, business_meta, timeout_seconds,
-                    skill_names, retryable, attempt, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
+                    skill_names, model_name, retryable, attempt, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
                 """;
         Instant now = r.getCreatedAt() == null ? Instant.now() : r.getCreatedAt();
         try {
@@ -112,6 +113,7 @@ public class MysqlTaskStore implements TaskStore {
                     r.getMetadata(),
                     r.getTimeoutSeconds(),
                     r.getSkillNames(),
+                    r.getModelName(),
                     ts(now),
                     ts(now));
             return affected == 1;

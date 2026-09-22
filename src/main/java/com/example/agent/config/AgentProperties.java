@@ -3,13 +3,21 @@ package com.example.agent.config;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /** Binding for the {@code agent.*} configuration tree. */
 @ConfigurationProperties(prefix = "agent")
 public class AgentProperties {
 
-    private final Model model = new Model();
+    /**
+     * 命名主模型 profile（如 flash / pro），彼此完全独立、无共享属性。
+     * task 可通过请求里的 {@code model} 字段选一个；缺省用 {@link #defaultModel}。
+     */
+    private final Map<String, Model> models = new LinkedHashMap<>();
+    /** 未指定 model 时使用的 profile 名。 */
+    private String defaultModel = "flash";
     private final Vision vision = new Vision();
     private final Pdfs pdfs = new Pdfs();
     private final Runner runner = new Runner();
@@ -18,8 +26,30 @@ public class AgentProperties {
     private final Skills skills = new Skills();
     private final Limits limits = new Limits();
 
-    public Model getModel() {
-        return model;
+    public Map<String, Model> getModels() {
+        return models;
+    }
+
+    public String getDefaultModel() {
+        return defaultModel;
+    }
+
+    public void setDefaultModel(String defaultModel) {
+        this.defaultModel = defaultModel;
+    }
+
+    /**
+     * 解析要用的主模型 profile。{@code requested} 为空 → 用 {@code defaultModel}。
+     * 未知 profile 名 → 抛 {@link IllegalArgumentException}（由调用方转成错误）。
+     */
+    public Model resolveModel(String requested) {
+        String name = (requested == null || requested.isBlank()) ? defaultModel : requested.trim();
+        Model m = models.get(name);
+        if (m == null) {
+            throw new IllegalArgumentException(
+                    "unknown model profile '" + name + "'; available: " + models.keySet());
+        }
+        return m;
     }
 
     public Vision getVision() {

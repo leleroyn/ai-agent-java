@@ -31,7 +31,7 @@
 | code | 含义 | 出现的接口 | 调用方该怎么做 |
 |---|---|---|---|
 | `0` | 成功 | 全部 | 读 `data` |
-| `1001` | 请求不合法：字段为空/超长、taskId 格式非法、技能名不存在、JSON 解析失败 | `POST /task` | 修正请求后重发，**勿原样重试** |
+| `1001` | 请求不合法：字段为空/超长、taskId 格式非法、技能名不存在、model profile 不存在、JSON 解析失败 | `POST /task` | 修正请求后重发，**勿原样重试** |
 | `1002` | 接口不存在（路径无对应处理器，如已下线或拼错的接口；伴随 HTTP 404） | 任意 | 检查请求路径 |
 | `2001` | 任务不存在 | `GET /task/{id}`、`DELETE /task/{id}` | 检查 taskId |
 | `2002` | 任务已是终态，无法取消 | `DELETE /task/{id}` | 无需处理，`message` 会给出当前状态 |
@@ -82,6 +82,7 @@ accepted ────────────────► running ───�
 | `taskId` | string | 否 | 幂等键，缺省由服务端生成。必须匹配 `[A-Za-z0-9][A-Za-z0-9._+-]{0,63}`，不得含路径分隔符（它会作为工作目录名） |
 | `outputSchema` | object | 否 | JSON Schema。提供则强制返回符合该 schema 的 JSON 到 `data.result`；不提供则自由文本放 `data.resultText` |
 | `skills` | string[] | 否 | 指定启用的技能名（见 `GET /skills`，大小写敏感）。不提供＝所有已安装技能可见；提供则这些技能正文被直接注入并强制生效。≤ 8 个 |
+| `model` | string | 否 | 主模型 profile（`flash` / `pro`，具体端点由部署配置）。不提供＝用默认（`agent.default-model`，当前 `flash`）；填未知 profile 名返回 `code=1001`，不静默回落。 |
 | `options.sync` | boolean | 否 | true＝阻塞等到终态；false（默认）＝立即返回，由调用方轮询 |
 | `options.timeoutSeconds` | int | 否 | 执行预算，默认 120，上限 900。**从 worker 领取任务时开始计时，不含排队** |
 | `metadata` | object | 否 | 业务上下文，服务端不解释，会**原样回显**（含嵌套结构）于所有响应。≤ 8192 字符 |
