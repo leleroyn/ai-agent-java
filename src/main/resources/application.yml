@@ -8,7 +8,7 @@ spring:
   # Credentials come from the environment only (see .env.example). Never commit a password.
   # Note: verified against MySQL 5.7.36 with Connector/J 9.7.0 (Spring Boot 4 managed version).
   datasource:
-    url: jdbc:mysql://${DB_HOST:192.168.2.190}:${DB_PORT:3306}/${DB_NAME:agent}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&characterEncoding=utf8
+    url: jdbc:mysql://${DB_HOST:192.168.2.190}:${DB_PORT:3306}/${DB_NAME:agent}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai&characterEncoding=utf8
     username: ${DB_USER:root}
     password: ${DB_PASSWORD:}
     hikari:
