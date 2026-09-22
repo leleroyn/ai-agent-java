@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.jtzj</groupId>
+        <artifactId>ai-agent-java</artifactId>
+        <version>1.2.0</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>ai-agent-tools</artifactId>
+    <name>ai-agent-tools</name>
+    <description>
+        Custom agent tools, each contributing an AgentToolProvider bean. This is the ONLY module
+        to edit when adding or changing a custom tool.
+    </description>
+
+    <dependencies>
+        <!-- Shared domain + services (VisionClient / PdfService / AgentProperties) and the tool SPI -->
+        <dependency>
+            <groupId>com.jtzj</groupId>
+            <artifactId>ai-agent-core</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <!-- @Tool / @ToolParam annotations and the Toolkit contract -->
+        <dependency>
+            <groupId>io.agentscope</groupId>
+            <artifactId>agentscope-spring-boot-starter</artifactId>
+            <version>${agentscope.version}</version>
+        </dependency>
+    </dependencies>
+</project>

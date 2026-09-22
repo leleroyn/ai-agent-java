@@ -14,7 +14,7 @@ else
 fi
 
 JAVA_HOME="${JAVA_HOME:-C:/Users/Administrator/.jdks/ms-17.0.20.1}"
-JAR="${JAR:-target/ai-agent-java-1.0.0.jar}"
+JAR="${JAR:-ai-agent-app/target/ai-agent-java-1.2.0.jar}"
 
 if [ ! -f "$JAR" ]; then
   echo "ERROR: $JAR not found — run scripts/build.sh first" >&2

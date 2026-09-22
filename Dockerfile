@@ -7,7 +7,7 @@
 #
 # 构建（推荐用脚本，会自动带版本号；本机 Maven 编译 jar）：
 #   bash scripts/docker-build.sh                # 需先构建过基础镜像，脚本会自检并提示
-#   SKIP_BUILD=1 bash scripts/docker-build.sh   # 复用已有 target/*.jar
+#   SKIP_BUILD=1 bash scripts/docker-build.sh   # 复用已有 ai-agent-app/target/*.jar
 #
 # 先构建基础镜像（仅首次、或增删系统工具/Python 库时）：
 #   bash scripts/docker-build-base.sh
@@ -29,7 +29,7 @@ ARG BASE_IMAGE
 ARG APP_VERSION=0.0.0-unknown
 ARG GIT_COMMIT=unknown
 ARG BUILD_TIME=unknown
-ARG JAR_FILE=target/ai-agent-java-1.0.0.jar
+ARG JAR_FILE=ai-agent-app/target/ai-agent-java-1.2.0.jar
 
 # jar 属 root:root、权限 644：appuser 能读、能执行，但改不了自己跑的 jar。
 COPY ${JAR_FILE} /app/app.jar

@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.jtzj</groupId>
+        <artifactId>ai-agent-java</artifactId>
+        <version>1.2.0</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>ai-agent-core</artifactId>
+    <name>ai-agent-core</name>
+    <description>Shared domain: model, config, shared services and the tool SPI</description>
+
+    <dependencies>
+        <!-- Spring context (@Component / @Qualifier / @ConfigurationProperties) + logging -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter</artifactId>
+        </dependency>
+        <!-- Jackson (ObjectMapper, JsonNode, ...) used by the shared services and models -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+        </dependency>
+        <!-- Jackson 3 (tools.jackson): Spring Boot 4 deserialises request bodies with Jackson 3,
+             so the request/domain models use tools.jackson.databind.JsonNode. (Jackson 2 above is
+             what AgentScope and the shared services speak.) -->
+        <dependency>
+            <groupId>tools.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>3.1.5</version>
+        </dependency>
+        <!-- Bean-validation annotations (e.g. @NotBlank) on the request/domain models -->
+        <dependency>
+            <groupId>jakarta.validation</groupId>
+            <artifactId>jakarta.validation-api</artifactId>
+        </dependency>
+    </dependencies>
+</project>

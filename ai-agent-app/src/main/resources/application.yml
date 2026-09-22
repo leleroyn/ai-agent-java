@@ -1,0 +1,224 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: ai-agent-java
+
+  # Credentials come from the environment only (see .env.example). Never commit a password.
+  # Note: verified against MySQL 5.7.36 with Connector/J 9.7.0 (Spring Boot 4 managed version).
+  datasource:
+    url: jdbc:mysql://${DB_HOST:192.168.2.190}:${DB_PORT:3306}/${DB_NAME:agent}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai&characterEncoding=utf8
+    username: ${DB_USER:root}
+    password: ${DB_PASSWORD:}
+    hikari:
+      maximum-pool-size: ${DB_POOL_MAX:16}
+      connection-timeout: 10000
+
+  # Create agent_task if absent. Idempotent (CREATE TABLE IF NOT EXISTS).
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:db/schema.sql
+      continue-on-error: false
+
+# Keep AgentScope's own auto-configured singleton agent OFF: this service builds
+# one ReActAgent per task (each task carries its own schema / tools / permission).
+agentscope:
+  agent:
+    enabled: false
+
+agent:
+  # 主模型 profile：task 可通过请求里的 model 字段选一个；未指定用 default-model。
+  # 两个 profile 完全独立、无共享属性，各自自由设定。未知 profile 名会在提交时拒绝。
+  default-model: ${AGENT_DEFAULT_MODEL:flash}
+  models:
+    # flash：小快模型（llama.cpp :8007，minicpm）。实测 n_ctx=8192、total_slots=1（串行），
+    # 只适合短上下文、简单任务；复杂/多图/长文档任务应用 pro。
+    flash:
+      base-url: ${AGENT_FLASH_BASE_URL:http://192.168.1.250:8007/v1}
+      api-key: ${AGENT_FLASH_API_KEY:local}
+      name: ${AGENT_FLASH_MODEL_NAME:minicpm}
+      native-structured-output-with-tools: ${AGENT_FLASH_NATIVE_SO_WITH_TOOLS:false}
+      native-structured-output: ${AGENT_FLASH_NATIVE_SO:true}
+      structured-output-mode: ${AGENT_FLASH_STRUCTURED_OUTPUT:two_phase}
+      reasoning-effort: ${AGENT_FLASH_REASONING_EFFORT:none}
+      max-tokens: ${AGENT_FLASH_MAX_TOKENS:2048}
+      temperature: ${AGENT_FLASH_TEMPERATURE:0.6}
+      context-window-size: ${AGENT_FLASH_CONTEXT_WINDOW:8192}
+    # pro：大上下文模型（llama.cpp :8009，qwen，n_ctx=200192、4 slots）。默认不用，
+    # 由 task 传 model:"pro" 启用；适合复杂/多图/长文档。
+    pro:
+      base-url: ${AGENT_PRO_BASE_URL:http://192.168.1.250:8009/v1}
+      api-key: ${AGENT_PRO_API_KEY:local}
+      name: ${AGENT_PRO_MODEL_NAME:qwen}
+      # llama.cpp 把 tools 与 response_format:json_schema 同时发会 400，故 with-tools=false；
+      # 带图+schema 靠 two_phase（先跑工具、再转 JSON）。
+      native-structured-output-with-tools: ${AGENT_PRO_NATIVE_SO_WITH_TOOLS:false}
+      native-structured-output: ${AGENT_PRO_NATIVE_SO:true}
+      structured-output-mode: ${AGENT_PRO_STRUCTURED_OUTPUT:two_phase}
+      reasoning-effort: ${AGENT_PRO_REASONING_EFFORT:none}
+      max-tokens: ${AGENT_PRO_MAX_TOKENS:131072}
+      temperature: ${AGENT_PRO_TEMPERATURE:1.0}
+      context-window-size: ${AGENT_PRO_CONTEXT_WINDOW:131072}
+
+  # 独立的视觉（多模态）模型，仅供 understand_image 工具调用。
+  # 图片字节只到这里，绝不进主模型的上下文——主模型保持纯文本。
+  # 该端点必须是带 mmproj 的真 VL 模型；不带 mmproj 的会直接返回
+  # "500 image input is not supported ... provide the mmproj"。
+  vision:
+    enabled: ${AGENT_VISION_ENABLED:true}
+    base-url: ${AGENT_VISION_BASE_URL:http://192.168.1.250:8008/v1}
+    api-key: ${AGENT_VISION_API_KEY:local}
+    name: ${AGENT_VISION_MODEL_NAME:qwenvl}
+    max-images: ${AGENT_VISION_MAX_IMAGES:8}
+    max-image-bytes: ${AGENT_VISION_MAX_IMAGE_BYTES:8388608}
+    timeout-seconds: ${AGENT_VISION_TIMEOUT:120}
+    temperature: ${AGENT_VISION_TEMPERATURE:0.0}
+    # 视觉模型推理强度：none 关闭思考（llama.cpp 走 chat_template_kwargs.enable_thinking）；留空则不下发。
+    reasoning-effort: ${AGENT_VISION_REASONING_EFFORT:none}
+
+  runner:
+    name: task-agent
+    # "Use a tool only when..." is load-bearing: with all tools registered, a self-contained
+    # instruction still made the agent go hunting through the filesystem until it timed out.
+    sys-prompt: >
+      You are an automated worker agent invoked over HTTP with no human present.
+      Use a tool only when the instruction genuinely requires information you do not already
+      have. If the instruction is self-contained, answer it directly and call no tool at all.
+      Do not search the filesystem to find context the instruction did not mention.
+      You cannot see images or documents yourself. Handle them ONLY with the dedicated tools below;
+      never read-file an image/pdf or print its bytes/text to stdout — that never reaches the vision
+      model and only floods your context. A source can be an http(s) URL or a local path inside your
+      working directory (if a file is only reachable via shell, download it INTO your working directory
+      as a file, then pass that path).
+      Images — pick ONE by intent: understand_image(image_urls, question) for open-ended understanding
+      (describe / compare / "is it the same"); extract_image_fields(image_urls, fields) when you need
+      specific FIELD VALUES out of an image (structured, won't miss). For MULTIPLE images it returns
+      one record per image (records:[{image, field: value, ...}]) — list EVERY image's values (e.g. one
+      row per invoice); do NOT collapse several images into a single set of values.
+      If the instruction mentions a document or contains a document/PDF URL (http(s)://....pdf),
+      PDFs — pick ONE by intent: extract_pdf_fields(pdf_url, fields) is the DEFAULT for EXTRACTING key
+      information — the server scans the WHOLE document and returns {field, value, pages} for every
+      field you asked, so you do NOT need to page through it yourself; if it returns incomplete=true,
+      continue with page_range and merge. understand_pdf(pdf_url, question, page_range) is for
+      open-ended understanding / summarizing / transcribing specific pages.
+      When the task is "find these specific pieces of information", prefer extract_* over understand_*
+      — it is built for recall. Call each tool once per target (extract_pdf_fields already covers the
+      whole document); answer from the first authoritative result and do not re-call to double-check.
+      When you have enough information, produce exactly the requested result and stop.
+      Never ask a question: there is nobody to answer it.
+      Skills override the rule above, in two cases. If the task text already contains loaded
+      skill specifications, follow them exactly — including any required marker line or format —
+      and do not call load_skill_through_path for them again. Otherwise, if an <available_skills>
+      block is present and any entry matches what you are being asked to produce, you MUST call
+      load_skill_through_path(skillId="<that entry's skill-id>", path="SKILL.md") first and then
+      follow the instructions it returns. A matching skill holds mandatory output conventions, not
+      optional background: answering without it counts as a wrong answer even when the text looks
+      good. Load only matching skills, and resolve skills before writing the final answer.
+    max-iters: ${AGENT_MAX_ITERS:20}
+    # BYPASS is required for the "all tools" decision: in DONT_ASK mode every ASK
+    # decision is demoted to DENY, which would silently block shell/write.
+    # Deny rules and dangerous-path checks still apply even under BYPASS.
+    # RISK: combined with no authentication, this exposes remote command execution.
+    # The container filesystem is the security boundary. Set to DONT_ASK or EXPLORE
+    # to harden, or add an auth layer before exposing this service.
+    permission-mode: ${AGENT_PERMISSION_MODE:BYPASS}
+
+  execution:
+    # Worker threads. Each claims one task at a time directly from MySQL, so this is the exact
+    # concurrency and there is no in-memory queue that could lose work on restart.
+    max-concurrent: ${AGENT_MAX_CONCURRENT:4}
+    default-timeout-seconds: ${AGENT_DEFAULT_TIMEOUT:120}
+    max-timeout-seconds: ${AGENT_MAX_TIMEOUT:900}
+    # A claim is valid for this long and is renewed while the task runs. If the process dies the
+    # lease lapses and the task is handed back to the queue instead of being lost.
+    lease-seconds: ${AGENT_LEASE_SECONDS:90}
+    lease-reap-seconds: ${AGENT_LEASE_REAP_SECONDS:30}
+    # Total claims allowed per task before it is failed with AGENT_LEASE_EXPIRED.
+    max-attempts: ${AGENT_MAX_ATTEMPTS:2}
+    # Poll pacing while the queue looks empty; doubles up to max-poll-backoff-seconds.
+    poll-interval-ms: ${AGENT_POLL_INTERVAL_MS:250}
+    max-poll-backoff-seconds: ${AGENT_POLL_BACKOFF_SECONDS:3}
+    claim-peek: 5
+    # Backpressure: refuse new submissions beyond this many still-queued tasks. 0 disables.
+    max-queued-tasks: ${AGENT_MAX_QUEUED_TASKS:1000}
+
+  # PDF 工具（understand_pdf 自由问答 / extract_pdf_fields 整篇抽取）：逐页栅格化后交给视觉模型
+  # （复用 agent.vision）；图片字节不进主模型上下文。extract_pdf_fields 服务端遍历整篇保召回，
+  # 语义总结交给主模型。
+  pdf:
+    enabled: ${AGENT_PDF_ENABLED:true}
+    # 每批交给视觉模型的页数（understand_pdf 单次上限；extract_pdf_fields 每批页数）。
+    # 实际上限 = min(本值, agent.vision.max-images)。
+    pages-per-call: ${AGENT_PDF_PAGES_PER_CALL:6}
+    # extract_pdf_fields 遍历整篇时的并发批数。
+    concurrency: ${AGENT_PDF_CONCURRENCY:4}
+    # extract_pdf_fields 服务端最多扫描多少页（兜底）；超过只扫前 N 页并标 incomplete。
+    max-pages: ${AGENT_PDF_MAX_PAGES:200}
+    # 栅格化最长边像素（控 token；0=不缩放）。pdftoppm -scale-to。
+    max-image-dimension: ${AGENT_PDF_MAX_DIM:1568}
+    jpeg-quality: ${AGENT_PDF_JPEG_QUALITY:85}
+    # 单次 VL 调用超时（秒）。
+    timeout-seconds: ${AGENT_PDF_TIMEOUT:120}
+    # PDF 下载体积上限（字节），防 DoS。
+    max-download-bytes: ${AGENT_PDF_MAX_DOWNLOAD_BYTES:209715200}
+    # SSRF 主机白名单（后缀匹配）；留空=允许任意 http/https（与图片工具一致）。
+    # ssrf-allowlist:
+    #   - internal.example
+
+  tools:
+    # Decision: expose all built-in tools. Requires permission-mode BYPASS.
+    shell: ${AGENT_TOOL_SHELL:true}
+    read-file: ${AGENT_TOOL_READ:true}
+    write-file: ${AGENT_TOOL_WRITE:true}
+    todo: ${AGENT_TOOL_TODO:true}
+    # 自定义工具：get_system_time（服务器当前时间）。默认全局开启。
+    system-time: ${AGENT_TOOL_SYSTEM_TIME:true}
+    # 自定义工具：understand_image（图片自由理解）。
+    image-understand: ${AGENT_TOOL_IMAGE_UNDERSTAND:true}
+    # 自定义工具：extract_image_fields（图片字段结构化抽取）。
+    image-extract: ${AGENT_TOOL_IMAGE_EXTRACT:true}
+    # 自定义工具：understand_pdf（PDF 自由理解/问答）。
+    document-understand: ${AGENT_TOOL_DOCUMENT_UNDERSTAND:true}
+    # 自定义工具：extract_pdf_fields（PDF 整篇字段抽取，服务端遍历保召回）。
+    document-extract: ${AGENT_TOOL_DOCUMENT_EXTRACT:true}
+
+    # Sandbox root. Each task gets its own private subdirectory <working-dir>/<taskId>,
+    # which is what the file tools are actually confined to.
+    working-dir: ${AGENT_WORKING_DIR:./agent-workspace}
+    # Delete a task's directory once it reaches a terminal state. Keep false while you want
+    # to inspect files the agent produced; the workspace doubles as the audit trail.
+    delete-workspace-on-finish: ${AGENT_DELETE_WORKSPACE_ON_FINISH:false}
+    # Shell allowlist. Empty = no allowlist restriction (subject to permission mode).
+    shell-allowed-commands: ${AGENT_SHELL_ALLOWED:}
+
+  skills:
+    # Reusable skills, AgentScope-style: <location>/<name>/SKILL.md with YAML frontmatter.
+    # Only name + description are injected into the prompt; the model pulls the body with
+    # load_skill_through_path, so the token cost stays low until a skill is actually used.
+    enabled: ${AGENT_SKILLS_ENABLED:true}
+    # Skills bundled in the jar. Silently skipped when the folder is not packaged.
+    classpath-location: ${AGENT_SKILLS_CLASSPATH:skills}
+    # Operator directory, higher priority: a same-named skill here overrides the bundled copy.
+    # Re-read per task by mtime/size, so editing a SKILL.md needs no restart.
+    directory: ${AGENT_SKILLS_DIR:./agent-skills}
+    lazy: ${AGENT_SKILLS_LAZY:true}
+    # Lets a skill's scripts run through the shell and adds <files-root> instructions.
+    # RISK: with shell enabled and no auth, anyone who can write the skills directory would get
+    # code execution. Leave off unless skill authors are trusted.
+    code-execution-enabled: ${AGENT_SKILLS_CODE_EXEC:false}
+    max-requested: ${AGENT_SKILLS_MAX_REQUESTED:8}
+    # Explicitly selected skills are injected into the prompt (deterministic, unlike waiting for
+    # the model to load them). This caps how much of the context they may take.
+    max-inline-chars: ${AGENT_SKILLS_MAX_INLINE_CHARS:12000}
+
+  limits:
+    max-instruction-chars: ${AGENT_LIMIT_INSTRUCTION:32768}
+    max-schema-chars: ${AGENT_LIMIT_SCHEMA:8192}
+    max-metadata-chars: ${AGENT_LIMIT_METADATA:8192}
+
+logging:
+  level:
+    com.jtzj.agent: INFO
+    io.agentscope: INFO

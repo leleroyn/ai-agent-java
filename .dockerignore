@@ -10,10 +10,13 @@
 *.pem
 *.key
 
-# --- 构建产物：只放行 fat jar ---
-target/*
-!target/*.jar
-target/*.jar.original
+# --- 构建产物：只放行 app 模块的 fat jar（多模块）---
+target/
+ai-agent-core/target/
+ai-agent-tools/target/
+ai-agent-app/target/*
+!ai-agent-app/target/*.jar
+ai-agent-app/target/*.jar.original
 
 # --- 运行期目录（容器内用 volume，不需要进镜像）---
 agent-workspace

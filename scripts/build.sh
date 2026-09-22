@@ -32,4 +32,4 @@ export JAVA_HOME
 
 echo
 echo "==> artifact:"
-ls -la target/*.jar
+ls -la ai-agent-app/target/*.jar

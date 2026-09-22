@@ -42,7 +42,7 @@ if [ "$GIT_COMMIT" != "unknown" ] && [ -n "$(git status --porcelain 2>/dev/null)
 fi
 BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-JAR="target/ai-agent-java-${VERSION}.jar"
+JAR="ai-agent-app/target/ai-agent-java-${VERSION}.jar"
 
 echo "==> version    : $VERSION"
 echo "==> git commit : $GIT_COMMIT"
@@ -52,10 +52,10 @@ echo "==> base image : $BASE_IMAGE"
 if [ "$SKIP_BUILD" != "1" ]; then
   echo "==> 编译 jar（本机 Maven + 内网 Nexus）"
   if ! bash scripts/build.sh; then
-    # 实测踩过：本地服务（scripts/run-local.sh）正用 java -jar 跑着 target/*.jar，
+    # 实测踩过：本地服务（scripts/run-local.sh）正用 java -jar 跑着 ai-agent-app/target/*.jar，
     # Windows 会锁住该文件，maven-clean 删不掉 → BUILD FAILURE，报错信息是乱码的
     # “另一个程序正在使用此文件”，很容易被误认为代码问题。
-    echo "ERROR: 编译失败。若日志里是 clean 阶段删不掉 target/*.jar，" >&2
+    echo "ERROR: 编译失败。若日志里是 clean 阶段删不掉 ai-agent-app/target/*.jar，" >&2
     echo "       先停掉本地服务（它正用 java -jar 锁着该文件），或改用 GOAL=package 跳过 clean。" >&2
     exit 1
   fi
@@ -65,7 +65,7 @@ fi
 
 if [ ! -f "$JAR" ]; then
   echo "ERROR: 找不到 $JAR；实际产物：" >&2
-  ls -la target/*.jar 2>/dev/null >&2 || echo "  target/ 下没有任何 jar" >&2
+  ls -la ai-agent-app/target/*.jar 2>/dev/null >&2 || echo "  ai-agent-app/target/ 下没有任何 jar" >&2
   echo "提示：jar 名与 pom <version> 不一致时，显式指定 JAR_FILE=... 或先去掉 SKIP_BUILD" >&2
   exit 1
 fi
