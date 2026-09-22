@@ -26,18 +26,18 @@ PUSH=1 IMAGE_REPO=reg.local:5000/ai-agent-java bash scripts/docker-build.sh
 
 | tag | 用途 |
 |---|---|
-| `ai-agent-java:1.1.0` | **按版本部署/回滚用这个** |
+| `ai-agent-java:1.2.0` | **按版本部署/回滚用这个** |
 | `ai-agent-java:latest` | 本地开发便利，生产别用 |
-| `ai-agent-java:1.1.0-<git短sha>` | 按代码版本回溯；工作区脏时改打 `-dirty` 且不出此 tag |
+| `ai-agent-java:1.2.0-<git短sha>` | 按代码版本回溯；工作区脏时改打 `-dirty` 且不出此 tag |
 
 版本三元组（version / commit / build time）与基础镜像写入 OCI label，事后可直接反查：
 
 ```bash
-docker image inspect ai-agent-java:1.1.0 \
+docker image inspect ai-agent-java:1.2.0 \
   --format '{{index .Config.Labels "org.opencontainers.image.version"}} {{index .Config.Labels "org.opencontainers.image.revision"}} {{index .Config.Labels "org.opencontainers.image.created"}}'
 ```
 
-> 版本由 `pom.xml` 的 `<version>` 单一决定（当前 `1.1.0`），`docker-build.sh` 会解析它作为镜像 tag 与 jar 名。发新版只改这一处即可，不要再带 `-SNAPSHOT`（语义上是"未定稿"，也不利于按版本回滚）。
+> 版本由 `pom.xml` 的 `<version>` 单一决定（当前 `1.2.0`），`docker-build.sh` 会解析它作为镜像 tag 与 jar 名。发新版只改这一处即可，不要再带 `-SNAPSHOT`（语义上是"未定稿"，也不利于按版本回滚）。
 
 ## 2. 镜像里有什么
 
@@ -79,8 +79,8 @@ python 库: pandas=2.1.4 numpy=1.26.4 requests=2.31.0 openpyxl=3.1.2
 > **基础镜像拆分只影响构建期，不影响分发**：`docker save` 应用镜像会把**全部基础层（环境）+ jar 层**一起打包，所以目标机只需加载应用镜像包即可，**无需单独加载 `ai-agent-base`**。（若想复用环境层、单独分发基础镜像以省传输，可选做；不是必需。）
 
 ```bash
-docker save ai-agent-java:1.1.0 ai-agent-java:latest | gzip -6 > dist/ai-agent-java-1.1.0.tar.gz
-( cd dist && sha256sum ai-agent-java-1.1.0.tar.gz > ai-agent-java-1.1.0.tar.gz.sha256 )
+docker save ai-agent-java:1.2.0 ai-agent-java:latest | gzip -6 > dist/ai-agent-java-1.2.0.tar.gz
+( cd dist && sha256sum ai-agent-java-1.2.0.tar.gz > ai-agent-java-1.2.0.tar.gz.sha256 )
 ```
 
 实测：1.06GB 镜像 → **264MB / 19 秒**。校验和必须在 `dist/` 目录内生成（文件里只记纯文件名），否则对端 `sha256sum -c` 会因为路径前缀对不上而失败。
@@ -88,8 +88,8 @@ docker save ai-agent-java:1.1.0 ai-agent-java:latest | gzip -6 > dist/ai-agent-j
 目标机导入：
 
 ```bash
-( cd dist && sha256sum -c ai-agent-java-1.1.0.tar.gz.sha256 )   # 期望输出 ...: OK
-docker load -i dist/ai-agent-java-1.1.0.tar.gz                 # 自动识别 gzip，实测 36 秒
+( cd dist && sha256sum -c ai-agent-java-1.2.0.tar.gz.sha256 )   # 期望输出 ...: OK
+docker load -i dist/ai-agent-java-1.2.0.tar.gz                 # 自动识别 gzip，实测 36 秒
 bash scripts/docker-run.sh                                     # 之后与常规启动一致
 ```
 
