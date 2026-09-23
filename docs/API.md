@@ -86,6 +86,7 @@ accepted ────────────────► running ───�
 | `options.sync` | boolean | 否 | true＝阻塞等到终态；false（默认）＝立即返回，由调用方轮询 |
 | `options.timeoutSeconds` | int | 否 | 执行预算，默认 120，上限 900。**从 worker 领取任务时开始计时，不含排队** |
 | `metadata` | object | 否 | 业务上下文，服务端不解释，会**原样回显**（含嵌套结构）于所有响应。≤ 8192 字符 |
+| `callbackUrl` | string | 否 | 任务终态后服务端 POST JSON 到该地址。必须以 `http://` 或 `https://` 开头，≤ 1024 字符。投递结果记录在数据库 `callback_status` 列（见 §3A） |
 
 ### 3.1 异步提交（推荐）
 
@@ -221,6 +222,96 @@ curl -X POST http://localhost:8080/api/v1/agent/task \
 // 队列积压超阈值
 { "code": 3001, "message": "queue depth exceeds agent.execution.max-queued-tasks (1000)" }
 ```
+
+---
+
+## 3A. 回调通知
+
+任务到达终态（`completed` / `failed` / `cancelled`）后，服务端向 `callbackUrl` 发一次 HTTP POST。
+
+### 请求特征
+
+| 项 | 值 |
+|---|---|
+| 方法 | POST |
+| Content-Type | `application/json; charset=utf-8` |
+| 超时 | 10 秒（连接+读取） |
+| 重定向 | 不跟随 |
+| 重试 | 无（失败不自动重试，由补偿机制或手动触发） |
+
+### 回调 Body
+
+```json
+{
+  "taskId": "6a86f6d7...",
+  "status": "completed",
+  "resultText": "1 + 1 = 2",
+  "result": {"name":"张伟","age":34},
+  "error": null,
+  "metadata": {"orderId":"A20260917"},
+  "model": "qwen",
+  "durationMs": 5432,
+  "totalTokens": 1200
+}
+```
+
+失败时：
+```json
+{
+  "taskId": "abc123",
+  "status": "failed",
+  "resultText": null,
+  "result": null,
+  "error": {"code":"AGENT_TIMEOUT","message":"exceeded 180s budget","retryable":true},
+  "metadata": {"orderId":"A20260917"},
+  "model": "minicpm",
+  "durationMs": 180001
+}
+```
+
+| 字段 | 说明 |
+|---|---|
+| `taskId` | 任务 ID |
+| `status` | 终态：`completed` / `failed` / `cancelled` |
+| `resultText` | 文本结果（无则省略） |
+| `result` | 结构化 JSON（带 outputSchema 且有结果时） |
+| `error` | 失败详情 `{code, message, retryable}`（成功时省略） |
+| `metadata` | 原样回显调用方的 metadata |
+| `model` | 实际使用的模型名 |
+| `durationMs` | 执行耗时 |
+| `totalTokens` | 总 token 数 |
+
+### 接收方要求
+
+- 返回 **HTTP 2xx** 表示接收成功，服务端记录 `callback_status='success'`
+- 非 2xx / 超时 / 连接失败 → `callback_status='failed'`
+
+### 手动重推
+
+数据库 `agent_task` 表的 `callback_status` 列控制投递状态：
+
+| callback_status | 含义 |
+|---|---|
+| `NULL` | 未配置回调 |
+| `success` | 已投递成功 |
+| `failed` | 投递失败 |
+| `pending` | 等待投递（系统每 30 秒扫描一次） |
+| `delivering` | 投递中（内部抢占状态） |
+
+**重推操作**：把状态改回 `pending`，系统自动补偿投递：
+
+```sql
+-- 重推单个任务
+UPDATE agent_task SET callback_status='pending' WHERE task_id='xxx';
+
+-- 批量重推所有失败的
+UPDATE agent_task SET callback_status='pending'
+  WHERE callback_status='failed' AND callback_url IS NOT NULL;
+```
+
+### 多实例安全
+
+多个服务实例同时补偿时，通过 `UPDATE ... WHERE callback_status='pending'` 条件更新抢占，只有一个实例能拿到 `affected=1` 并执行投递，不会重复推送。
 
 ---
 
