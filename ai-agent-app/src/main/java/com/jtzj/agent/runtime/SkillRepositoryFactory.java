@@ -218,7 +218,7 @@ public class SkillRepositoryFactory {
      * @return a subdirectory of the task sandbox, cleaned up with it
      */
     public Path workDirFor(Path taskDir) {
-        Path dir = taskDir.resolve("skills");
+        Path dir = taskDir.resolve(".skillwork");
         try {
             Files.createDirectories(dir);
         } catch (Exception e) {
