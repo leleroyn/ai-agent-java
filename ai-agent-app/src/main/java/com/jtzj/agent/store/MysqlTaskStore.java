@@ -37,6 +37,7 @@ public class MysqlTaskStore implements TaskStore {
 
     private static final String COLUMNS = """
             task_id, status, instruction, output_schema, business_meta, timeout_seconds, skill_names, model_name,
+            callback_url, callback_status, callback_at,
             result_json, result_text, error_code, error_message, retryable,
             input_tokens, output_tokens, total_tokens, duration_ms, attempt,
             created_at, started_at, completed_at, updated_at
@@ -59,6 +60,10 @@ public class MysqlTaskStore implements TaskStore {
         r.setAttempt(readInt(rs, "attempt"));
         r.setSkillNames(rs.getString("skill_names"));
         r.setModelName(rs.getString("model_name"));
+        r.setCallbackUrl(rs.getString("callback_url"));
+        r.setCallbackStatus(rs.getString("callback_status"));
+        Timestamp cbAt = rs.getTimestamp("callback_at");
+        r.setCallbackAt(cbAt == null ? null : cbAt.toInstant());
         r.setResultJson(rs.getString("result_json"));
         r.setResultText(rs.getString("result_text"));
         r.setErrorCode(rs.getString("error_code"));
@@ -100,8 +105,8 @@ public class MysqlTaskStore implements TaskStore {
         String sql = """
                 INSERT IGNORE INTO agent_task (
                     task_id, status, instruction, output_schema, business_meta, timeout_seconds,
-                    skill_names, model_name, retryable, attempt, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
+                    skill_names, model_name, callback_url, retryable, attempt, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
                 """;
         Instant now = r.getCreatedAt() == null ? Instant.now() : r.getCreatedAt();
         try {
@@ -114,6 +119,7 @@ public class MysqlTaskStore implements TaskStore {
                     r.getTimeoutSeconds(),
                     r.getSkillNames(),
                     r.getModelName(),
+                    r.getCallbackUrl(),
                     ts(now),
                     ts(now));
             return affected == 1;
@@ -343,6 +349,26 @@ public class MysqlTaskStore implements TaskStore {
     @Override
     public void deleteIfStatus(String taskId, String status) {
         jdbc.update("DELETE FROM agent_task WHERE task_id = ? AND status = ?", taskId, status);
+    }
+
+    @Override
+    public void updateCallbackStatus(String taskId, String status, Instant at) {
+        jdbc.update("UPDATE agent_task SET callback_status = ?, callback_at = ? WHERE task_id = ?",
+                status, ts(at), taskId);
+    }
+
+    @Override
+    public java.util.List<TaskRecord> findPendingCallbacks(int limit) {
+        String sql = "SELECT " + COLUMNS + " FROM agent_task"
+                + " WHERE callback_url IS NOT NULL AND callback_status = 'pending'"
+                + " ORDER BY completed_at ASC LIMIT ?";
+        return jdbc.query(sql, MAPPER, limit);
+    }
+
+    @Override
+    public boolean claimCallback(String taskId) {
+        return jdbc.update("UPDATE agent_task SET callback_status = 'delivering'"
+                + " WHERE task_id = ? AND callback_status = 'pending'", taskId) == 1;
     }
 
     private static String truncate(String value, int max) {

@@ -31,7 +31,8 @@ public record AgentTaskRequest(
         java.util.List<String> skills,
         String model,
         Options options,
-        JsonNode metadata) {
+        JsonNode metadata,
+        String callbackUrl) {
 
     /**
      * @param sync           when true the HTTP call blocks until the task settles

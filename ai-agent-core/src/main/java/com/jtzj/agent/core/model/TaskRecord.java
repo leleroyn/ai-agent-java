@@ -20,6 +20,12 @@ public class TaskRecord {
     private String skillNames;
     /** main-model profile used for this task (flash / pro); null = default at run time. */
     private String modelName;
+    /** Callback URL to notify when task reaches terminal state; null = no callback. */
+    private String callbackUrl;
+    /** Callback delivery result: null = not configured, "success", "failed". */
+    private String callbackStatus;
+    /** Timestamp of the last callback attempt. */
+    private Instant callbackAt;
 
     private String resultJson;
     private String resultText;
@@ -108,6 +114,30 @@ public class TaskRecord {
 
     public void setModelName(String modelName) {
         this.modelName = modelName;
+    }
+
+    public String getCallbackUrl() {
+        return callbackUrl;
+    }
+
+    public void setCallbackUrl(String callbackUrl) {
+        this.callbackUrl = callbackUrl;
+    }
+
+    public String getCallbackStatus() {
+        return callbackStatus;
+    }
+
+    public void setCallbackStatus(String callbackStatus) {
+        this.callbackStatus = callbackStatus;
+    }
+
+    public Instant getCallbackAt() {
+        return callbackAt;
+    }
+
+    public void setCallbackAt(Instant callbackAt) {
+        this.callbackAt = callbackAt;
     }
 
     public String getResultJson() {

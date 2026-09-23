@@ -99,4 +99,19 @@ public interface TaskStore {
 
     /** Queue depth for a status, used for backpressure and health reporting. */
     long countByStatus(TaskStatus status);
+
+    /** Record callback delivery result for a task. */
+    void updateCallbackStatus(String taskId, String status, Instant at);
+
+    /**
+     * Find terminal tasks with callback_status='pending', for compensation delivery.
+     * Only picks up rows explicitly set to pending (manual re-trigger or crash recovery).
+     */
+    java.util.List<TaskRecord> findPendingCallbacks(int limit);
+
+    /**
+     * Atomically claim a pending callback for delivery.
+     * @return true when this instance won the claim (safe to deliver)
+     */
+    boolean claimCallback(String taskId);
 }

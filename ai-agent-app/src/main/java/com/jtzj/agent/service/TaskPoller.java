@@ -49,6 +49,7 @@ public class TaskPoller implements DisposableBean {
     private final AgentTaskRunner runner;
     private final AgentProperties props;
     private final ObjectMapper jackson2;
+    private final CallbackNotifier callbackNotifier;
     private final String workerId;
 
     private final ScheduledExecutorService scheduler =
@@ -65,11 +66,12 @@ public class TaskPoller implements DisposableBean {
     private volatile boolean running;
 
     public TaskPoller(TaskStore store, AgentTaskRunner runner, AgentProperties props,
-                      ObjectMapper jackson2) {
+                      ObjectMapper jackson2, CallbackNotifier callbackNotifier) {
         this.store = store;
         this.runner = runner;
         this.props = props;
         this.jackson2 = jackson2;
+        this.callbackNotifier = callbackNotifier;
         this.workerId = buildWorkerId();
     }
 
@@ -214,6 +216,12 @@ public class TaskPoller implements DisposableBean {
             if (written) {
                 log.info("task {} completed in {}ms tokens={}/{} hasResult={}",
                         taskId, durationMs, inputTokens, outputTokens, outcome.result() != null);
+                task.setStatus(TaskStatus.COMPLETED);
+                task.setResultText(outcome.text());
+                task.setResultJson(outcome.result() == null ? null : outcome.result().toString());
+                task.setDurationMs(durationMs);
+                task.setTotalTokens(totalTokens);
+                callbackNotifier.notifyIfConfigured(task);
             } else {
                 log.info("task {} finished but no longer owned (cancelled or lease stolen);"
                         + " result not written", taskId);
@@ -224,12 +232,22 @@ public class TaskPoller implements DisposableBean {
                     taskId, e.getCode(), e.isRetryable(), e.getMessage());
             store.markFailed(taskId, workerId, e.getCode(), e.getMessage(),
                     e.isRetryable(), null, Instant.now(), durationMs);
+            task.setStatus(TaskStatus.FAILED);
+            task.setErrorCode(e.getCode());
+            task.setErrorMessage(e.getMessage());
+            task.setRetryable(e.isRetryable());
+            callbackNotifier.notifyIfConfigured(task);
         } catch (Exception e) {
             long durationMs = System.currentTimeMillis() - startMillis;
             log.error("task {} failed unexpectedly", taskId, e);
             store.markFailed(taskId, workerId, ErrorCodes.AGENT_EXECUTION_FAILED,
                     e.getClass().getSimpleName() + ": " + e.getMessage(),
                     false, null, Instant.now(), durationMs);
+            task.setStatus(TaskStatus.FAILED);
+            task.setErrorCode(ErrorCodes.AGENT_EXECUTION_FAILED);
+            task.setErrorMessage(e.getClass().getSimpleName() + ": " + e.getMessage());
+            task.setRetryable(false);
+            callbackNotifier.notifyIfConfigured(task);
         } finally {
             renewal.cancel(false);
             executing.remove(taskId);

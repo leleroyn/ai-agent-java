@@ -44,15 +44,18 @@ public class AgentTaskService {
     private final TaskPoller poller;
     private final TaskWorkspaceFactory workspaceFactory;
     private final SkillRepositoryFactory skillRepositoryFactory;
+    private final CallbackNotifier callbackNotifier;
     private final AgentProperties props;
     private final ObjectMapper mapper;
 
     public AgentTaskService(TaskStore store, TaskPoller poller,
                             TaskWorkspaceFactory workspaceFactory,
                             SkillRepositoryFactory skillRepositoryFactory,
+                            CallbackNotifier callbackNotifier,
                             AgentProperties props, ObjectMapper mapper) {
         this.store = store;
         this.poller = poller;
+        this.callbackNotifier = callbackNotifier;
         this.workspaceFactory = workspaceFactory;
         this.skillRepositoryFactory = skillRepositoryFactory;
         this.props = props;
@@ -118,6 +121,7 @@ public class AgentTaskService {
         candidate.setSkillNames(skills.isEmpty() ? null : String.join(",", skills));
         // Persisted so a task claimed after a restart still runs on the same model profile.
         candidate.setModelName(modelName);
+        candidate.setCallbackUrl(normalizeCallbackUrl(request.callbackUrl()));
         candidate.setCreatedAt(Instant.now());
 
         boolean created = store.insertIfAbsent(candidate);
@@ -163,6 +167,8 @@ public class AgentTaskService {
         }
         boolean interrupted = poller.interrupt(taskId);
         log.info("task {} cancelled (localInterrupt={})", taskId, interrupted);
+        // Trigger callback with cancelled state
+        store.find(taskId).ifPresent(callbackNotifier::notifyIfConfigured);
         return true;
     }
 
@@ -235,6 +241,17 @@ public class AgentTaskService {
             throw invalid("taskId must match [A-Za-z0-9][A-Za-z0-9._+-]{0,63}"
                     + " and must not contain path separators");
         }
+        // Callback URL: must be http/https, max 1024 chars.
+        String cb = request.callbackUrl();
+        if (cb != null && !cb.isBlank()) {
+            String trimmed = cb.trim();
+            if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) {
+                throw invalid("callbackUrl must start with http:// or https://");
+            }
+            if (trimmed.length() > 1024) {
+                throw invalid("callbackUrl exceeds 1024 characters");
+            }
+        }
     }
 
     private static AgentException invalid(String message) {
@@ -243,6 +260,13 @@ public class AgentTaskService {
 
     private static int lengthOf(tools.jackson.databind.JsonNode node) {
         return node == null || node.isNull() ? 0 : node.toString().length();
+    }
+
+    private static String normalizeCallbackUrl(String url) {
+        if (url == null || url.isBlank()) {
+            return null;
+        }
+        return url.trim();
     }
 
     private String resolveTaskId(AgentTaskRequest request) {
