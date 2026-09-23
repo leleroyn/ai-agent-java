@@ -1,7 +1,9 @@
 package com.jtzj.agent.service;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.jtzj.agent.api.ApiResponse;
 import com.jtzj.agent.core.model.TaskRecord;
-import com.jtzj.agent.core.model.TaskStatus;
+import com.jtzj.agent.core.model.TaskStatusView;
 import com.jtzj.agent.store.TaskStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -37,12 +39,14 @@ public class CallbackNotifier {
     private static final int COMPENSATION_BATCH = 50;
 
     private final TaskStore store;
+    private final ObjectMapper jackson2;
     private final HttpClient httpClient;
     private final ExecutorService executor;
     private final java.util.concurrent.ScheduledExecutorService compensationScheduler;
 
-    public CallbackNotifier(TaskStore store) {
+    public CallbackNotifier(TaskStore store, ObjectMapper jackson2) {
         this.store = store;
+        this.jackson2 = jackson2;
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(DEFAULT_TIMEOUT)
                 .followRedirects(HttpClient.Redirect.NEVER)
@@ -102,11 +106,21 @@ public class CallbackNotifier {
     }
 
     private void deliver(TaskRecord task) {
-        String payload = buildPayload(task);
+        // Re-read from DB to ensure payload is identical to GET /task/{id} response data.
+        TaskRecord fresh = store.find(task.getTaskId()).orElse(task);
+        String payload;
+        try {
+            TaskStatusView view = TaskStatusView.of(fresh, jackson2);
+            payload = jackson2.writeValueAsString(ApiResponse.ok(view));
+        } catch (Exception e) {
+            log.error("callback serialize failed task={}: {}", task.getTaskId(), e.getMessage());
+            store.updateCallbackStatus(task.getTaskId(), "failed", Instant.now());
+            return;
+        }
         Instant now = Instant.now();
         try {
             HttpRequest req = HttpRequest.newBuilder()
-                    .uri(URI.create(task.getCallbackUrl()))
+                    .uri(URI.create(fresh.getCallbackUrl()))
                     .timeout(DEFAULT_TIMEOUT)
                     .header("Content-Type", "application/json; charset=utf-8")
                     .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8))
@@ -115,70 +129,14 @@ public class CallbackNotifier {
             int code = resp.statusCode();
             if (code >= 200 && code < 300) {
                 store.updateCallbackStatus(task.getTaskId(), "success", now);
-                log.info("callback success task={} url={} httpStatus={}", task.getTaskId(), task.getCallbackUrl(), code);
+                log.info("callback success task={} url={} httpStatus={}", task.getTaskId(), fresh.getCallbackUrl(), code);
             } else {
                 store.updateCallbackStatus(task.getTaskId(), "failed", now);
-                log.warn("callback failed task={} url={} httpStatus={}", task.getTaskId(), task.getCallbackUrl(), code);
+                log.warn("callback failed task={} url={} httpStatus={}", task.getTaskId(), fresh.getCallbackUrl(), code);
             }
         } catch (Exception e) {
             store.updateCallbackStatus(task.getTaskId(), "failed", now);
-            log.warn("callback error task={} url={}: {}", task.getTaskId(), task.getCallbackUrl(), e.getMessage());
+            log.warn("callback error task={} url={}: {}", task.getTaskId(), fresh.getCallbackUrl(), e.getMessage());
         }
-    }
-
-    private String buildPayload(TaskRecord t) {
-        StringBuilder sb = new StringBuilder(512);
-        sb.append('{');
-        json(sb, "taskId", t.getTaskId()); sb.append(',');
-        json(sb, "status", t.getStatus() == null ? null : t.getStatus().wire());
-        if (t.getResultText() != null) { sb.append(','); json(sb, "resultText", t.getResultText()); }
-        if (t.getResultJson() != null) { sb.append(','); json(sb, "result", t.getResultJson(), true); }
-        if (t.getErrorCode() != null) {
-            sb.append(",\"error\":{");
-            json(sb, "code", t.getErrorCode()); sb.append(',');
-            json(sb, "message", t.getErrorMessage());
-            sb.append(",\"retryable\":").append(Boolean.TRUE.equals(t.getRetryable()));
-            sb.append('}');
-        }
-        if (t.getMetadata() != null) { sb.append(','); json(sb, "metadata", t.getMetadata(), true); }
-        if (t.getModelName() != null) { sb.append(','); json(sb, "model", t.getModelName()); }
-        if (t.getDurationMs() != null) { sb.append(",\"durationMs\":").append(t.getDurationMs()); }
-        if (t.getTotalTokens() != null) { sb.append(",\"totalTokens\":").append(t.getTotalTokens()); }
-        sb.append('}');
-        return sb.toString();
-    }
-
-    private static void json(StringBuilder sb, String key, String value) {
-        json(sb, key, value, false);
-    }
-
-    private static void json(StringBuilder sb, String key, String value, boolean rawValue) {
-        sb.append('"').append(key).append("\":");
-        if (value == null) {
-            sb.append("null");
-        } else if (rawValue) {
-            sb.append(value); // assume it's already valid JSON
-        } else {
-            escapeJson(sb, value);
-        }
-    }
-
-    private static void escapeJson(StringBuilder sb, String s) {
-        sb.append('"');
-        for (int i = 0; i < s.length(); i++) {
-            char c = s.charAt(i);
-            switch (c) {
-                case '"' -> sb.append("\\\"");
-                case '\\' -> sb.append("\\\\");
-                case '\n' -> sb.append("\\n");
-                case '\r' -> sb.append("\\r");
-                case '\t' -> sb.append("\\t");
-                default -> {
-                    if (c < 0x20) sb.append(String.format("\\u%04x", (int) c));
-                    else sb.append(c);
-                }
-            }
-        }
-        sb.append('"');
     }
 }

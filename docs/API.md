@@ -241,45 +241,44 @@ curl -X POST http://localhost:8080/api/v1/agent/task \
 
 ### 回调 Body
 
+**与 `GET /task/{taskId}` 响应结构完全一致**（同样的信封 + 同样的 `data`）：
+
 ```json
 {
-  "taskId": "6a86f6d7...",
-  "status": "completed",
-  "resultText": "1 + 1 = 2",
-  "result": {"name":"张伟","age":34},
-  "error": null,
-  "metadata": {"orderId":"A20260917"},
-  "model": "qwen",
-  "durationMs": 5432,
-  "totalTokens": 1200
+  "code": 0,
+  "data": {
+    "taskId": "6a86f6d7...",
+    "status": "completed",
+    "resultText": "1 + 1 = 2",
+    "result": {"name":"张伟","age":34},
+    "metadata": {"orderId":"A20260917"},
+    "usage": {"inputTokens":4759,"outputTokens":9,"totalTokens":4768},
+    "createdAt": "2026-09-23T15:20:56.644Z",
+    "startedAt": "2026-09-23T15:20:57.799Z",
+    "completedAt": "2026-09-23T15:21:08.471Z",
+    "durationMs": 10662
+  }
 }
 ```
 
 失败时：
 ```json
 {
-  "taskId": "abc123",
-  "status": "failed",
-  "resultText": null,
-  "result": null,
-  "error": {"code":"AGENT_TIMEOUT","message":"exceeded 180s budget","retryable":true},
-  "metadata": {"orderId":"A20260917"},
-  "model": "minicpm",
-  "durationMs": 180001
+  "code": 0,
+  "data": {
+    "taskId": "abc123",
+    "status": "failed",
+    "error": {"code":"AGENT_TIMEOUT","message":"exceeded 180s budget","retryable":true},
+    "metadata": {"orderId":"A20260917"},
+    "createdAt": "2026-09-23T15:20:56.644Z",
+    "startedAt": "2026-09-23T15:20:57.799Z",
+    "completedAt": "2026-09-23T15:23:57.800Z",
+    "durationMs": 180001
+  }
 }
 ```
 
-| 字段 | 说明 |
-|---|---|
-| `taskId` | 任务 ID |
-| `status` | 终态：`completed` / `failed` / `cancelled` |
-| `resultText` | 文本结果（无则省略） |
-| `result` | 结构化 JSON（带 outputSchema 且有结果时） |
-| `error` | 失败详情 `{code, message, retryable}`（成功时省略） |
-| `metadata` | 原样回显调用方的 metadata |
-| `model` | 实际使用的模型名 |
-| `durationMs` | 执行耗时 |
-| `totalTokens` | 总 token 数 |
+接收方用同一套解析逻辑即可处理回调和查询结果。
 
 ### 接收方要求
 
