@@ -49,13 +49,11 @@ services:
     ports:
       - "${APP_PORT:-8080}:8080"
     volumes:
-      # agent 的文件工具与 shell 就在此工作；镜像内 /workspace 已 chown 给 uid 10001，
-      # 首次挂载会继承该权限，named volume 场景无需额外 chown。
-      - agent-workspace:/workspace
+      # bind mount 到宿主机 ./agent-workspace，方便直接在服务器查看 task 产物。
+      - ./agent-workspace:/workspace
       # 只读：技能是部署配置，容器内不应该能改它（已实测 touch 会 Read-only file system）。
       - ${SKILLS_HOST_DIR:-./agent-skills}:/skills:ro
     restart: unless-stopped
 
 volumes:
   mysql-data:
-  agent-workspace:

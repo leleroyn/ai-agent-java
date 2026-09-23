@@ -5,10 +5,13 @@
 #   bash scripts/docker-run.sh --build        # 先调 scripts/docker-build.sh 打版本再启动
 #   IMAGE=ai-agent-java:1.0.0 bash scripts/docker-run.sh
 #
-# 关于目录：容器内 agent 的工作根目录固定为 /workspace（named volume），每个任务实际
+# 关于目录：容器内 agent 的工作根目录固定为 /workspace（bind mount 到宿主机目录），每个任务实际
 # 跑在 /workspace/<taskId>。AGENT_WORKING_DIR 在这里被显式设为 /workspace——.env 里若写
 # 相对路径（本地开发习惯的 ./agent-workspace）会在容器里套成 /workspace/agent-workspace，
 # 虽能持久化但容易和宿主机路径混淆，所以由部署脚本统一给绝对路径。
+#
+# 宿主机 workspace 目录：默认 $HOST_DIR/agent-workspace（即项目目录/agent-workspace），
+# 部署到 203 后直接在 /data/ai-agent/agent-workspace/<taskId>/ 就能看到任务产物。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -24,15 +27,18 @@ IMAGE="${IMAGE:-ai-agent-java:latest}"
 NAME="${NAME:-ai-agent-java}"
 PORT="${PORT:-8080}"
 ENV_FILE="${ENV_FILE:-.env}"
-WORKSPACE_VOLUME="${WORKSPACE_VOLUME:-agent-workspace}"
-# 宿主机技能目录（相对仓库根），只读挂到容器 /skills。目录不存在时先建好，
-# 否则 bind mount 会按 root 属主自动创建，容易给后续写入埋坑。
-SKILLS_HOST_DIR="${SKILLS_HOST_DIR:-agent-skills}"
-[ -d "$SKILLS_HOST_DIR" ] || mkdir -p "$SKILLS_HOST_DIR"
 # Docker Desktop on Windows 的 bind mount 源必须是 Windows 风格路径（F:/...），
 # Git Bash 的 /f/... 不行；而本脚本已禁用 MSYS 自动转换，所以显式取 pwd -W。
 # Linux/macOS 上 pwd -W 会失败，退回普通 pwd。
 HOST_DIR="$(pwd -W 2>/dev/null || pwd)"
+# 宿主机 workspace 目录：bind mount 到容器 /workspace，方便直接在服务器查看 task 产物。
+# 默认 = 项目目录/agent-workspace；可用 WORKSPACE_HOST_DIR 覆盖。
+WORKSPACE_HOST_DIR="${WORKSPACE_HOST_DIR:-$HOST_DIR/agent-workspace}"
+mkdir -p "$WORKSPACE_HOST_DIR"
+# 宿主机技能目录（相对仓库根），只读挂到容器 /skills。目录不存在时先建好，
+# 否则 bind mount 会按 root 属主自动创建，容易给后续写入埋坑。
+SKILLS_HOST_DIR="${SKILLS_HOST_DIR:-agent-skills}"
+[ -d "$SKILLS_HOST_DIR" ] || mkdir -p "$SKILLS_HOST_DIR"
 SKILLS_SRC="$HOST_DIR/$SKILLS_HOST_DIR"
 
 if [ ! -f "$ENV_FILE" ]; then
@@ -66,7 +72,7 @@ docker run -d \
   -e AGENT_WORKING_DIR=/workspace \
   -e AGENT_SKILLS_DIR=/skills \
   -p "${PORT}:8080" \
-  -v "${WORKSPACE_VOLUME}:/workspace" \
+  -v "${WORKSPACE_HOST_DIR}:/workspace" \
   -v "${SKILLS_SRC}:/skills:ro" \
   --restart unless-stopped \
   "$IMAGE"
