@@ -227,6 +227,8 @@ public class AgentProperties {
         private Double temperature = 0.0;
         /** 视觉模型推理强度：{@code "none"} 关闭思考（llama.cpp 经 chat_template_kwargs.enable_thinking 生效）；空=不下发该参数。 */
         private String reasoningEffort = "none";
+        /** 视觉模型最大输出 token 数；null=不下发（用后端默认）。 */
+        private Integer maxTokens;
 
         public boolean isEnabled() {
             return enabled;
@@ -298,6 +300,14 @@ public class AgentProperties {
 
         public void setReasoningEffort(String reasoningEffort) {
             this.reasoningEffort = reasoningEffort;
+        }
+
+        public Integer getMaxTokens() {
+            return maxTokens;
+        }
+
+        public void setMaxTokens(Integer maxTokens) {
+            this.maxTokens = maxTokens;
         }
     }
 

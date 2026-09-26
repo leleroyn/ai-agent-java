@@ -77,6 +77,8 @@ agent:
     temperature: ${AGENT_VISION_TEMPERATURE:0.0}
     # 视觉模型推理强度：none 关闭思考（llama.cpp 走 chat_template_kwargs.enable_thinking）；留空则不下发。
     reasoning-effort: ${AGENT_VISION_REASONING_EFFORT:none}
+    # 视觉模型最大输出 token；留空=不下发（用后端默认）。
+    max-tokens: ${AGENT_VISION_MAX_TOKENS:}
 
   runner:
     name: task-agent

@@ -268,6 +268,9 @@ public class VisionClient {
             throws Exception {
         ObjectNode root = mapper.createObjectNode();
         root.put("model", v.getName());
+        if (v.getMaxTokens() != null) {
+            root.put("max_tokens", v.getMaxTokens());
+        }
         if (v.getTemperature() != null) {
             root.put("temperature", v.getTemperature());
         }
