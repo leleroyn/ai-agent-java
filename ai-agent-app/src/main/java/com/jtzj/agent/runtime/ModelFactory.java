@@ -83,6 +83,9 @@ public class ModelFactory {
             kwargs.put("enable_thinking", false);
             go.additionalBodyParam("chat_template_kwargs", kwargs);
         }
+        if (m.getStrataCheckpoint() != null) {
+            go.additionalBodyParam("strata_checkpoint", m.getStrataCheckpoint());
+        }
         builder.generateOptions(go.build());
 
         log.debug("building model name={} baseUrl={} nativeSoWithTools={} reasoningEffort={}",
