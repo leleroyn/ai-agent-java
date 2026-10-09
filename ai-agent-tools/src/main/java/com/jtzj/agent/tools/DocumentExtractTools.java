@@ -25,13 +25,8 @@ public class DocumentExtractTools {
 
     @Tool(
             name = "extract_pdf_fields",
-            description = "从 PDF 文档【整篇抽取指定关键信息并定位页码】，返回 {field,value,pages} 列表。"
-                    + "这是抽取的关键信息、追求不漏的首选：服务端会自动遍历整篇（你不用管分页），每个请求字段都会出现在 results 里"
-                    + "（抽不到 value=null），并给出出现的页码。传入：文档来源(pdf_url，http/https URL 或本任务工作目录下的本地 PDF 路径) "
-                    + "+ 要抽取的字段(fields，多个用 ; 逗号 、 或换行分隔，写全你要的每一项) + 可选页范围(page_range，默认整篇)。"
-                    + "返回里若 incomplete=true 表示因上限只扫了部分页，按 hint 用 page_range 续扫再自行合并。"
-                    + "如果你只是要理解/总结/问答，改用 understand_pdf。不要自己用 shell 转 PDF 或把内容读进对话。"
-                    + "【防循环】对同一份文档最多调用一次即可（它已遍历整篇），据此作答。",
+            description = "PDF 结构化字段抽取。用于从 PDF 中提取指定字段并定位页码。自动遍历整篇（无需手动分页），"
+                    + "每个请求字段都会出现在结果里（抽不到 value=null）。返回 [{field, value, pages}, ...]。",
             readOnly = true,
             concurrencySafe = true)
     public String extractPdfFields(

@@ -24,13 +24,8 @@ public class DocumentUnderstandTools {
 
     @Tool(
             name = "understand_pdf",
-            description = "对 PDF 做自由理解/问答。当你需要理解、总结、转录、或回答关于某几页内容的开放性问题时用。"
-                    + "传入：文档来源(pdf_url，http/https URL 或本任务工作目录下的本地 PDF 路径) + 一个问题(question，"
-                    + "留空则逐页转录说明) + 可选页范围(page_range，如 \"1-5\")。服务端把这些页栅格化后交给视觉模型，"
-                    + "返回自然语言（引用内容带绝对页码）。一次处理的页数有上限，超限会提示你用 page_range 分批。"
-                    + "如果你要的是【从整篇文档抽取指定字段并定位页码】，请改用 extract_pdf_fields（服务端遍历整篇，召回更高）。"
-                    + "不要为了理解 PDF 而把内容打印到 stdout 或用 read-file 读进对话。"
-                    + "【防循环】对同一批页最多调用一次，第一次返回即权威。",
+            description = "PDF 自由理解/问答。用于理解、总结、转录、或回答关于某几页内容的开放性问题。"
+                    + "返回自然语言（带绝对页码引用）。单次处理页数有上限，超限会提示分批。",
             readOnly = true,
             concurrencySafe = true)
     public String understandPdf(

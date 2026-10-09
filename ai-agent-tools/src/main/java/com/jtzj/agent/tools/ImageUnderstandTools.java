@@ -31,13 +31,8 @@ public class ImageUnderstandTools {
 
     @Tool(
             name = "understand_image",
-            description = "对图片做自由理解/问答的唯一正确方式。当需要看图、描述图、对比多张图、判断两张图是否同一张、"
-                    + "或回答关于图的一般性问题时用它。传入：图片来源(image_urls，http/https URL 或本任务工作目录下的本地图片路径，"
-                    + "多个用空格或换行分隔，可混用) + 一个问题(question，写清你要知道什么)。服务端把图交给视觉模型，"
-                    + "返回自然语言。多图会在同一次调用里一起分析，可跨图对比。"
-                    + "如果你要的是若干【具体字段的值】（如发票号、金额、日期），请改用 extract_image_fields（结构化抽取，更可靠）。"
-                    + "不要用 read-file 读图片、也不要把图片内容打印到 stdout——那样图片进不了模型。"
-                    + "【防循环】对同一组图最多调用一次，第一次返回即权威，据此作答。",
+            description = "图片自由理解/问答。用于描述图片、对比多图、判断是否同一张、回答关于图片的开放性问题。"
+                    + "多图在一次调用中一起分析，可跨图对比。返回自然语言文本。",
             readOnly = true,
             concurrencySafe = true)
     public String understandImage(

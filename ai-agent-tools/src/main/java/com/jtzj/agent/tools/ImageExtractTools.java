@@ -55,14 +55,8 @@ public class ImageExtractTools {
 
     @Tool(
             name = "extract_image_fields",
-            description = "从图片里【结构化抽取】指定字段。多图时【每张图返回一条记录】，返回 "
-                    + "{records:[{image, 字段:值, ...}, ...]}（image=第几张图，按传入顺序；单图即数组长度 1），"
-                    + "每条记录里每个请求字段都会出现，抽不到为 null。当你要的是若干张图里具体字段的值"
-                    + "（如多张发票的发票号/金额/税额/日期/购销方名称）时用本工具，比自由问答更可靠、防漏、不混票。"
-                    + "传入：图片来源(image_urls，http/https URL 或本任务工作目录下的本地图片路径，多个用空格/换行分隔，可混用) "
-                    + "+ 要抽取的字段(fields，多个用 ; 逗号 、 或换行分隔)。"
-                    + "如果只是要理解/描述/对比图片，改用 understand_image。"
-                    + "图片字节只进视觉模型、不进你的上下文。【防循环】对同一组图最多调用一次，第一次返回即权威。",
+            description = "图片结构化字段抽取。用于从一张或多张图片中提取指定字段的值（如发票号、金额、日期等）。"
+                    + "多图时每张图返回一条记录。返回 {records:[{image, field: value, ...}, ...]}，抽不到的字段为 null。",
             readOnly = true,
             concurrencySafe = true)
     public String extractImageFields(

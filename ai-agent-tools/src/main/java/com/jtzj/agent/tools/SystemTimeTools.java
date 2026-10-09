@@ -49,14 +49,8 @@ public class SystemTimeTools {
      */
     @Tool(
             name = "get_system_time",
-            description = "获取服务器当前日期和时间，并且可以直接算出「N 天后／前天」的目标日期。"
-                    + "凡是任务涉及「今天」「昨天」「最近几天」「是否已过期」"
-                    + "「距离某个日期还有多久」，或者需要给输出盖上当前时间，都必须先调用本工具，"
-                    + "禁止凭记忆或猜测推断现在几点。"
-                    + "需要偏移时直接传 offset_days / offset_hours（例如问“3 天后是哪天”就传"
-                    + "offset_days=3），一次调用就能拿到目标日期；不要用 shell 的 date 命令做日期运算。"
-                    + "返回内容包含：本地时间、ISO-8601（带时区偏移）、星期、Unix 秒级时间戳，"
-                    + "以及偏移时的目标日期。可选参数 timezone 用于切换时区。",
+            description = "获取服务器当前日期时间，可附带相对偏移计算。"
+                    + "返回本地时间、ISO-8601、星期、Unix 时间戳，以及可选的偏移目标日期。",
             readOnly = true,
             concurrencySafe = true)
     public String getSystemTime(

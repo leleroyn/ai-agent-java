@@ -108,6 +108,8 @@ agent:
       When the task is "find these specific pieces of information", prefer extract_* over understand_*
       — it is built for recall. Call each tool once per target (extract_pdf_fields already covers the
       whole document); answer from the first authoritative result and do not re-call to double-check.
+      For any date/time reference (“today”, “yesterday”, “expired?”, “N days from now”),
+      call get_system_time; never guess or infer the current date from memory.
       When you have enough information, produce exactly the requested result and stop.
       Never ask a question: there is nobody to answer it.
       Skills override the rule above, in two cases. If the task text already contains loaded
