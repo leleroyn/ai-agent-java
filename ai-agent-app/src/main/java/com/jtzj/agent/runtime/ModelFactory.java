@@ -83,13 +83,14 @@ public class ModelFactory {
             kwargs.put("enable_thinking", false);
             go.additionalBodyParam("chat_template_kwargs", kwargs);
         }
-        if (m.getStrataCheckpoint() != null) {
-            go.additionalBodyParam("strata_checkpoint", m.getStrataCheckpoint());
+        String sc = m.getStrataCheckpoint();
+        if (sc != null && !sc.isBlank()) {
+            go.additionalBodyParam("strata_checkpoint", Boolean.parseBoolean(sc.trim()));
         }
         builder.generateOptions(go.build());
 
-        log.debug("building model name={} baseUrl={} nativeSoWithTools={} reasoningEffort={}",
-                m.getName(), m.getBaseUrl(), m.isNativeStructuredOutputWithTools(), effort);
+        log.debug("building model name={} baseUrl={} nativeSoWithTools={} reasoningEffort={} strataCheckpoint={}",
+                m.getName(), m.getBaseUrl(), m.isNativeStructuredOutputWithTools(), effort, m.getStrataCheckpoint());
 
         return builder.build();
     }

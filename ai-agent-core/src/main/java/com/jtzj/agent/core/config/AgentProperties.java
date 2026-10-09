@@ -119,8 +119,8 @@ public class AgentProperties {
         private Integer maxTokens = 4096;
         private Double temperature = 0.2;
         private Integer contextWindowSize = 262144;
-        /** strata_checkpoint 参数（llama.cpp/strata 特有）；null=不下发，使用 strata 时配为 false。 */
-        private Boolean strataCheckpoint;
+        /** strata_checkpoint 参数（llama.cpp/strata 特有）；空=不下发，使用 strata 时配为 false。 */
+        private String strataCheckpoint;
 
         public String getBaseUrl() {
             return baseUrl;
@@ -202,11 +202,11 @@ public class AgentProperties {
             this.contextWindowSize = contextWindowSize;
         }
 
-        public Boolean getStrataCheckpoint() {
+        public String getStrataCheckpoint() {
             return strataCheckpoint;
         }
 
-        public void setStrataCheckpoint(Boolean strataCheckpoint) {
+        public void setStrataCheckpoint(String strataCheckpoint) {
             this.strataCheckpoint = strataCheckpoint;
         }
     }
