@@ -170,8 +170,8 @@ ai-agent-java/                         Maven 父工程 (packaging=pom, groupId c
 | 键组 | 关键项 |
 |---|---|
 | `agent.default-model` | 默认档位（`flash`） |
-| `agent.models.<flash\|pro>` | **两套完全独立**：`base-url` `api-key` `name` `max-tokens` `temperature` `context-window-size` `structured-output-mode` `reasoning-effort` `native-structured-output` `native-structured-output-with-tools` |
-| `agent.vision` | 独立视觉模型：`base-url` `api-key` `name` `temperature` `reasoning-effort` `max-images` `max-image-bytes` `timeout-seconds` |
+| `agent.models.<flash\|pro>` | **两套完全独立**：`base-url` `api-key` `name` `max-tokens` `temperature` `context-window-size` `structured-output-mode` `reasoning-effort` `native-structured-output` `native-structured-output-with-tools` `strata-checkpoint` |
+| `agent.vision` | 独立视觉模型：`base-url` `api-key` `name` `temperature` `reasoning-effort` `max-tokens` `max-images` `max-image-bytes` `timeout-seconds` |
 | `agent.runner` | `name` `sys-prompt` `max-iters` `permission-mode`(默认 `BYPASS`) |
 | `agent.execution` | `max-concurrent`(4) `default-timeout-seconds`(120) `max-timeout-seconds`(900) `lease-seconds`(90) `lease-reap-seconds`(30) `max-attempts`(2) `poll-interval-ms` `claim-peek` `max-queued-tasks`(1000) |
 | `agent.tools.*` | 自定义工具按 provider 名开关（默认开）+ 框架内置 `shell/read-file/write-file/todo` + `working-dir` `shell-allowed-commands` `delete-workspace-on-finish` |
