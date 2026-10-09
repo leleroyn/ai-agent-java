@@ -46,7 +46,6 @@ agent:
       max-tokens: ${AGENT_FLASH_MAX_TOKENS:2048}
       temperature: ${AGENT_FLASH_TEMPERATURE:0.6}
       context-window-size: ${AGENT_FLASH_CONTEXT_WINDOW:8192}
-      strata-checkpoint: ${AGENT_FLASH_STRATA_CHECKPOINT:}
     # pro：大上下文模型（llama.cpp :8009，qwen，n_ctx=200192、4 slots）。默认不用，
     # 由 task 传 model:"pro" 启用；适合复杂/多图/长文档。
     pro:
@@ -62,7 +61,6 @@ agent:
       max-tokens: ${AGENT_PRO_MAX_TOKENS:131072}
       temperature: ${AGENT_PRO_TEMPERATURE:1.0}
       context-window-size: ${AGENT_PRO_CONTEXT_WINDOW:131072}
-      strata-checkpoint: ${AGENT_PRO_STRATA_CHECKPOINT:}
 
   # 独立的视觉（多模态）模型，仅供 understand_image 工具调用。
   # 图片字节只到这里，绝不进主模型的上下文——主模型保持纯文本。
