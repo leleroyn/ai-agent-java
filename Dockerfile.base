@@ -82,6 +82,10 @@ RUN set -eux; \
         python3-lxml python3-bs4 \
         # PDF 处理：pdftoppm/pdfinfo/pdftotext/pdfimages，供文档工具栅格化页图、取文字层、探测含图片的页
         poppler-utils \
+        # poppler-data：CJK CMap（Adobe-GB1/UniGB 等）。缺它时 pdftotext 会把 PDF 里的中文值整段丢掉，
+        # 并打印 "Missing language pack for 'Adobe-GB1' mapping"。它是 poppler-utils 的 Recommends，
+        # 而上面用了 --no-install-recommends，所以必须显式装。
+        poppler-data \
     ; \
     ln -sf "/usr/share/zoneinfo/${TZ}" /etc/localtime; \
     dpkg-reconfigure -f noninteractive tzdata >/dev/null 2>&1 || true; \

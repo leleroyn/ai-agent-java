@@ -52,7 +52,8 @@ import org.springframework.stereotype.Component;
  *
  * <p>需要 OCR 的页逐批喂视觉模型很慢，所以先探测：{@code pdfimages -list} 找含图片的页，再加一条兜底——
  * {@code pdftotext} 文字层里中日韩占比过低的页（缺 ToUnicode 的「假文字层」，中文会全丢）。这些页走
- * {@link OcrClient}（逐页 OCR 换文本），其余页取文字层，之后的抽取/问答只发文本；
+ * {@link OcrClient}（逐页 OCR 换文本），其余页取文字层，之后的字段抽取只发文本；
+ * <b>只有字段抽取走这条通道</b>：{@code understand_document} 的自由问答始终走视觉，因为 OCR 文本会丢掉版面与图形信息。
  * OCR 未启用或不可用时自动回退视觉通道。
  */
 @Component
@@ -117,13 +118,6 @@ public class PdfService {
             }
             String q = (question == null || question.isBlank())
                     ? "请逐页转录并说明这一页的标题与主要内容。" : question.trim();
-            // 需要 OCR 的页走 OCR 文本通道；没有页需要 OCR 或 OCR 全失败时回退视觉模型。
-            if (ocrClient.isEnabled()) {
-                String viaOcr = understandViaOcr(pdf, start, end, total, q, taskDir);
-                if (viaOcr != null) {
-                    return viaOcr;
-                }
-            }
             List<String> urls = rasterize(pdf, start, end, 0, taskDir);
             if (urls.isEmpty()) {
                 return "Error: 栅格化第 " + start + "-" + end + " 页失败（可能不是有效 PDF）。";
@@ -177,12 +171,15 @@ public class PdfService {
             // 视觉模型快得多；其余页直接取 pdftotext 文字层，不花 OCR 成本。
             // 没有页需要 OCR、或 OCR 全部失败时返回 null，自动回退下面的视觉管线。
             if (ocrClient.isEnabled()) {
-                PageTexts pt = collectPageTexts(pdf, start, scanEnd, taskDir);
+                PageTexts pt = collectPageTexts(pdf, start, scanEnd, taskDir, false);
                 if (pt != null) {
                     LinkedHashMap<String, LinkedHashMap<String, TreeSet<Integer>>> ocrAcc = new LinkedHashMap<>();
                     TreeSet<Integer> ocrFailed = new TreeSet<>();
                     extractFromPageTexts(pt, fields, total, start, scanEnd, ocrAcc, ocrFailed);
-                    return buildExtractResult(fields, ocrAcc, ocrFailed, total, start, scanEnd, incomplete, "ocr");
+                    if (!allFieldsEmpty(fields, ocrAcc)) {
+                        return buildExtractResult(fields, ocrAcc, ocrFailed, total, start, scanEnd, incomplete, "ocr");
+                    }
+                    log.info("OCR 通道字段全空，回退视觉管线重跑");
                 }
             }
 
@@ -228,6 +225,19 @@ public class PdfService {
             } finally {
                 exec.shutdownNow();
             }
+            // 兜底：视觉管线一个请求字段都没抽到，强制逐页 OCR 再试一次（只在失败时多花这一趟）。
+            if (allFieldsEmpty(fields, acc) && ocrClient.isEnabled()) {
+                log.info("视觉管线字段全空，强制 OCR 重跑 pages={}-{}", start, scanEnd);
+                PageTexts pt = collectPageTexts(pdf, start, scanEnd, taskDir, true);
+                if (pt != null) {
+                    LinkedHashMap<String, LinkedHashMap<String, TreeSet<Integer>>> retryAcc = new LinkedHashMap<>();
+                    TreeSet<Integer> retryFailed = new TreeSet<>();
+                    extractFromPageTexts(pt, fields, total, start, scanEnd, retryAcc, retryFailed);
+                    if (!allFieldsEmpty(fields, retryAcc)) {
+                        return buildExtractResult(fields, retryAcc, retryFailed, total, start, scanEnd, incomplete, "ocr");
+                    }
+                }
+            }
             return buildExtractResult(fields, acc, failedPages, total, start, scanEnd, incomplete, "vision");
         } catch (Exception e) {
             log.error("pdf extract failed src={}", pdfSource, e);
@@ -235,6 +245,18 @@ public class PdfService {
         } finally {
             cleanup(taskDir, downloaded ? "source.pdf" : null);
         }
+    }
+
+    /** 请求的字段是否一个都没抽到值——「换一条通道再试一次」的兜底判定。 */
+    private static boolean allFieldsEmpty(List<String> fields,
+                                          LinkedHashMap<String, LinkedHashMap<String, TreeSet<Integer>>> acc) {
+        for (String f : fields) {
+            LinkedHashMap<String, TreeSet<Integer>> byValue = acc.get(f);
+            if (byValue != null && !byValue.isEmpty()) {
+                return false;
+            }
+        }
+        return true;
     }
 
     // ---- 单批结构化抽取 ----
@@ -382,7 +404,7 @@ public class PdfService {
      *
      * @return 页文本与失败页；{@code null} 表示没有任何页需要 OCR、或 OCR 全部失败——调用方走视觉管线
      */
-    private PageTexts collectPageTexts(Path pdf, int start, int end, Path taskDir) {
+    private PageTexts collectPageTexts(Path pdf, int start, int end, Path taskDir, boolean forceOcr) {
         AgentProperties.Ocr o = props.getOcr();
         TreeMap<Integer, String> texts = pageTexts(pdf, start, end);
         TreeSet<Integer> imagePages = pagesWithImages(pdf, start, end);
@@ -395,7 +417,13 @@ public class PdfService {
             }
         }
         if (targetSet.isEmpty()) {
-            return null;
+            if (!forceOcr) {
+                return null;
+            }
+            // 兜底重跑：视觉管线整篇没抽到任何请求字段，强制逐页 OCR 再试一次。
+            for (int p = start; p <= end; p++) {
+                targetSet.add(p);
+            }
         }
         log.info("ocr 选页 pages={}-{} imagePages={} textLayerUnusable={} ocrPages={}",
                 start, end, imagePages.size(), unusableTextLayer, targetSet.size());
@@ -555,38 +583,6 @@ public class PdfService {
             return null;
         }
         return hits;
-    }
-
-    /** 自由问答（OCR 文本通道）。返回 {@code null}=没有页需要 OCR 或 OCR 全失败，调用方回退视觉管线。 */
-    private String understandViaOcr(Path pdf, int start, int end, int total, String question, Path taskDir) {
-        PageTexts pt = collectPageTexts(pdf, start, end, taskDir);
-        if (pt == null) {
-            return null;
-        }
-        List<List<TextPiece>> chunks = chunkPieces(pt.byPage, props.getPdfs().getTextChunkSize());
-        if (chunks.isEmpty()) {
-            return "这些页 OCR 未识别出文字（可能是空白页或纯图形内容）。";
-        }
-        if (chunks.size() == 1) {
-            return visionClient.askTextOnly(buildTextQaPrompt(chunks.get(0), total, question));
-        }
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < chunks.size(); i++) {
-            String answer = visionClient.askTextOnly(buildTextQaPrompt(chunks.get(i), total, question));
-            if (answer.startsWith("Error:")) {
-                sb.append("[第 ").append(i + 1).append('/').append(chunks.size()).append(" 段处理失败]\n");
-            } else {
-                sb.append(answer).append('\n');
-            }
-        }
-        return sb.toString().trim();
-    }
-
-    private String buildTextQaPrompt(List<TextPiece> chunk, int total, String question) {
-        return "以下是同一份文档的识别文本（全文共 " + total + " 页），每页以【第 N 页】标记开始。"
-                + "文本由 OCR/文字层取得，可能有少量错字。\n"
-                + "只依据这段文本作答，不要编造；引用了文档中的具体内容，请标注它出现的绝对页码。\n要求："
-                + question + "\n\n--- 文档内容 ---\n" + pageMarkedText(chunk);
     }
 
     private static String pageMarkedText(List<TextPiece> chunk) {

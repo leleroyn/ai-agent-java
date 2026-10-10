@@ -1,6 +1,7 @@
 package com.jtzj.agent.tools;
 
 import com.jtzj.agent.core.config.AgentProperties;
+import com.jtzj.agent.core.service.OcrClient;
 import com.jtzj.agent.core.service.PdfService;
 import com.jtzj.agent.core.service.TextService;
 import com.jtzj.agent.core.service.VisionClient;
@@ -38,19 +39,27 @@ public class DocumentExtractTools {
 
     private static final Logger log = LoggerFactory.getLogger(DocumentExtractTools.class);
 
+    private static final java.util.regex.Pattern WHITESPACE = java.util.regex.Pattern.compile("\\s+");
+    private static final java.util.regex.Pattern DIGIT = java.util.regex.Pattern.compile("[0-9]");
+    /** OCR 文本里的候选 token：字母数字开头结尾，中间允许千分位/小数点/常见分隔符。 */
+    private static final java.util.regex.Pattern TOKEN =
+            java.util.regex.Pattern.compile("[0-9A-Za-z][0-9A-Za-z.,\\-/$%]*[0-9A-Za-z]");
+
     private final VisionClient visionClient;
     private final PdfService pdfService;
     private final TextService textService;
     private final AgentProperties props;
     private final ObjectMapper mapper;
     private final Path taskDir;
+    private final OcrClient ocrClient;
 
     public DocumentExtractTools(VisionClient visionClient, PdfService pdfService,
                                 TextService textService, AgentProperties props,
-                                ObjectMapper mapper, Path taskDir) {
+                                ObjectMapper mapper, Path taskDir, OcrClient ocrClient) {
         this.visionClient = visionClient;
         this.pdfService = pdfService;
         this.textService = textService;
+        this.ocrClient = ocrClient;
         this.props = props;
         this.mapper = mapper;
         this.taskDir = taskDir;
@@ -245,7 +254,116 @@ public class DocumentExtractTools {
             if (h.value() == null || h.value().isBlank()) continue;
             vals.merge(h.field(), h.value().trim(), (a, b) -> a + " | " + b);
         }
+        // 视觉模型读长数字/字母串不可靠（实测把 18 位统一社会信用代码读成 17 位），OCR 服务对同一张图
+        // 读得准，所以拿 OCR 文本校正视觉结果。OCR 不可用时原样返回，行为与改动前一致。
+        String ocrText = ocrTextOf(dataUrl);
+        if (ocrText != null) {
+            vals = correctWithOcr(vals, ocrText);
+            if (vals.isEmpty()) {
+                LinkedHashMap<String, String> fromText = extractFromOcrText(ocrText, fields);
+                if (fromText != null) {
+                    vals = fromText;
+                }
+            }
+        }
         return ImgOut.ok(vals);
+    }
+
+    /**
+     * 把 data URL 解回字节送 OCR 服务，取这张图的 OCR 文本。
+     * OCR 未启用、解不出 base64、或没读出文字时返回 {@code null}，调用方保持原有视觉结果。
+     */
+    private String ocrTextOf(String dataUrl) {
+        if (!ocrClient.isEnabled()) {
+            return null;
+        }
+        int comma = dataUrl.indexOf(',');
+        if (comma < 0) {
+            return null;
+        }
+        byte[] bytes;
+        try {
+            bytes = java.util.Base64.getDecoder().decode(dataUrl.substring(comma + 1));
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+        String text = ocrClient.ocrImage(bytes, "image");
+        return (text == null || text.startsWith("Error:") || text.isBlank()) ? null : text;
+    }
+
+    /**
+     * 用 OCR 文本校正视觉模型的字段值。视觉模型读长数字/字母串不可靠（实测把 18 位统一社会信用代码
+     * 读成 17 位），OCR 服务对同一张图稳定读对。
+     *
+     * <p>只在条件全部满足时替换，避免误伤：值里含数字、该值不是 OCR 文本的子串、且 OCR 文本里
+     * <b>恰好一个</b> token 与它首尾字符相同、长度差在 6 以内、并且两者互为子序列。
+     */
+    private LinkedHashMap<String, String> correctWithOcr(LinkedHashMap<String, String> vals, String ocrText) {
+        String compact = WHITESPACE.matcher(ocrText).replaceAll("");
+        List<String> tokens = new ArrayList<>();
+        java.util.regex.Matcher m = TOKEN.matcher(ocrText);
+        while (m.find()) {
+            tokens.add(m.group());
+        }
+        LinkedHashMap<String, String> fixed = new LinkedHashMap<>();
+        for (var e : vals.entrySet()) {
+            String v = e.getValue();
+            String vc = WHITESPACE.matcher(v).replaceAll("");
+            if (vc.isEmpty() || !DIGIT.matcher(vc).find() || compact.contains(vc)) {
+                fixed.put(e.getKey(), v);
+                continue;
+            }
+            String best = null;
+            int matches = 0;
+            for (String t : tokens) {
+                if (t.charAt(0) != vc.charAt(0)
+                        || t.charAt(t.length() - 1) != vc.charAt(vc.length() - 1)
+                        || Math.abs(t.length() - vc.length()) > 6) {
+                    continue;
+                }
+                if (isSubsequence(vc, t) || isSubsequence(t, vc)) {
+                    matches++;
+                    best = t;
+                }
+            }
+            if (matches == 1 && !best.equals(vc)) {
+                log.info("ocr 校正字段 {}：{} -> {}", e.getKey(), v, best);
+                fixed.put(e.getKey(), best);
+            } else {
+                fixed.put(e.getKey(), v);
+            }
+        }
+        return fixed;
+    }
+
+    /** 视觉结果全空时的兜底：直接从 OCR 文本里抽字段，不再看图。 */
+    private LinkedHashMap<String, String> extractFromOcrText(String ocrText, List<String> fields) {
+        String answer = visionClient.askTextOnly(buildImagePrompt(fields)
+                + "\n\n以下是这张图片的 OCR 文本，只依据它作答：\n" + ocrText);
+        if (answer == null || answer.startsWith("Error:")) {
+            return null;
+        }
+        List<Extraction.Hit> hits = Extraction.parseHits(mapper, answer);
+        if (hits == null) {
+            return null;
+        }
+        LinkedHashMap<String, String> vals = new LinkedHashMap<>();
+        for (Extraction.Hit h : hits) {
+            if (h.value() == null || h.value().isBlank()) continue;
+            vals.merge(h.field(), h.value().trim(), (a, b) -> a + " | " + b);
+        }
+        return vals.isEmpty() ? null : vals;
+    }
+
+    /** {@code small} 是否为 {@code big} 的子序列（允许 big 中间多出字符）。 */
+    private static boolean isSubsequence(CharSequence small, CharSequence big) {
+        int i = 0;
+        for (int j = 0; j < big.length() && i < small.length(); j++) {
+            if (big.charAt(j) == small.charAt(i)) {
+                i++;
+            }
+        }
+        return i == small.length();
     }
 
     private static String buildImagePrompt(List<String> fields) {

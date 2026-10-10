@@ -443,6 +443,22 @@ UPDATE agent_task SET callback_status='pending'
 - 只列自定义工具：`get_system_time`、`understand_document`、`extract_document_fields`。框架内置的 `execute_shell_command`/`view_text_file`/`write_text_file`/`insert_text_file`/`list_directory`/`todo_write` **不在此列**。
 - 列表随 `agent.tools.*` 开关变化：关掉某个开关（如 `AGENT_TOOL_DOCUMENT_EXTRACT=false`），对应自定义工具就不再出现；两个文档开关全关时返回空数组。
 
+### 6.1 `extract_document_fields` 的返回口径
+
+工具结果是一个 JSON 字符串，形状固定：
+
+```json
+{"status":"complete","total_units":2,
+ "results":[{"field":"签订日期","value":"2026年3月18日","units":[1]}],
+ "failed_units":[]}
+```
+
+- **每个请求的字段都恰好出现一条**；文档里确实没有时 `value` 是 JSON `null`、`units` 是空数组。这是服务端写死的口径，不是模型措辞——下游按 `value === null` 判缺失，不要匹配「未提及」这类文案。
+- `units` 含义随类型变化：图片=图序号、PDF=页码、TXT=段号。同一字段抽到多个不同值时会出现多条，各带自己的 `units`。
+- `status`：`complete`＝所有单元都成功；`partial`＝有单元失败，失败单元在 `failed_units`。
+- PDF 结果额外带 `pipeline`：`ocr`＝含图片的页或文字层不可用的页走了 OCR 文本通道；`vision`＝逐页栅格化喂视觉模型。
+- OCR 文本通道**只用于字段抽取**。`understand_document` 对 PDF 始终走视觉，因为 OCR 文本会丢掉版面与图形信息。
+
 ---
 
 ## 7. 技能清单

@@ -1,6 +1,7 @@
 package com.jtzj.agent.tools;
 
 import com.jtzj.agent.core.spi.AgentToolProvider;
+import com.jtzj.agent.core.service.OcrClient;
 import com.jtzj.agent.core.spi.ToolContext;
 import org.springframework.stereotype.Component;
 
@@ -17,6 +18,6 @@ public class DocumentExtractToolProvider implements AgentToolProvider {
     public Object createTool(ToolContext context) {
         return new DocumentExtractTools(
                 context.vision(), context.pdf(), context.text(),
-                context.properties(), context.mapper(), context.taskDir());
+                context.properties(), context.mapper(), context.taskDir(), context.bean(OcrClient.class));
     }
 }
