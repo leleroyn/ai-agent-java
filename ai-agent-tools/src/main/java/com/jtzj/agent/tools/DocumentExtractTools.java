@@ -61,7 +61,8 @@ public class DocumentExtractTools {
             description = "文档结构化字段抽取。支持图片（jpg/png/webp等）、PDF、TXT。"
                     + "用于从文档中提取指定字段的值（如发票号、金额、日期、合同条款等）。"
                     + "自动遍历整篇（无需手动分页），每个请求字段都会出现在结果里（抽不到 value=null）。"
-                    + "图片返回 {records:[{image, field: value}]}；PDF/TXT 返回 {results:[{field, value, pages}]}。",
+                    + "返回 {status, total_units, results:[{field, value, units}], failed_units}。"
+                    + "units: 图片=图序号, PDF=页码, TXT=段号。",
             readOnly = true,
             concurrencySafe = true)
     public String extractFields(
@@ -166,12 +167,10 @@ public class DocumentExtractTools {
             for (String du : dataUrls) {
                 futures.add(exec.submit(() -> extractOneImage(du, fields)));
             }
-            ObjectNode root = mapper.createObjectNode();
-            ArrayNode records = root.putArray("records");
-            int failed = 0;
+            // 统一为 results:[{field, value, units}] 格式
+            LinkedHashMap<String, LinkedHashMap<String, java.util.TreeSet<Integer>>> acc = new LinkedHashMap<>();
+            java.util.TreeSet<Integer> failedUnits = new java.util.TreeSet<>();
             for (int i = 0; i < n; i++) {
-                ObjectNode rec = records.addObject();
-                rec.put("image", i + 1);
                 ImgOut out;
                 try {
                     out = futures.get(i).get();
@@ -179,28 +178,50 @@ public class DocumentExtractTools {
                     out = ImgOut.fail(e.getClass().getSimpleName() + ": " + e.getMessage());
                 }
                 if (out.error != null) {
-                    failed++;
-                    rec.put("error", out.error);
-                    for (String f : fields) rec.putNull(f);
+                    failedUnits.add(i + 1);
                     continue;
                 }
-                for (String f : fields) {
-                    String v = out.values.get(f);
-                    if (v == null || v.isBlank()) {
-                        rec.putNull(f);
-                    } else {
-                        rec.put(f, v);
-                    }
-                }
                 for (var e : out.values.entrySet()) {
-                    if (!fields.contains(e.getKey())) {
-                        rec.put(e.getKey(), e.getValue());
-                    }
+                    acc.computeIfAbsent(e.getKey(), x -> new LinkedHashMap<>())
+                            .computeIfAbsent(e.getValue(), x -> new java.util.TreeSet<>())
+                            .add(i + 1);
                 }
             }
-            if (failed > 0) {
-                root.put("note", failed + " 张图抽取失败（见对应 record 的 error）；如需可逐张单独重试。");
+            ObjectNode root = mapper.createObjectNode();
+            root.put("status", failedUnits.isEmpty() ? "complete" : "partial");
+            root.put("total_units", n);
+            ArrayNode results = root.putArray("results");
+            java.util.LinkedHashSet<String> emitted = new java.util.LinkedHashSet<>();
+            for (String field : fields) {
+                emitted.add(field);
+                LinkedHashMap<String, java.util.TreeSet<Integer>> byValue = acc.get(field);
+                if (byValue == null || byValue.isEmpty()) {
+                    ObjectNode r = results.addObject();
+                    r.put("field", field);
+                    r.putNull("value");
+                    r.putArray("units");
+                    continue;
+                }
+                for (var e : byValue.entrySet()) {
+                    ObjectNode r = results.addObject();
+                    r.put("field", field);
+                    r.put("value", e.getKey());
+                    ArrayNode units = r.putArray("units");
+                    for (int u : e.getValue()) units.add(u);
+                }
             }
+            for (var e : acc.entrySet()) {
+                if (emitted.contains(e.getKey())) continue;
+                for (var ve : e.getValue().entrySet()) {
+                    ObjectNode r = results.addObject();
+                    r.put("field", e.getKey());
+                    r.put("value", ve.getKey());
+                    ArrayNode units = r.putArray("units");
+                    for (int u : ve.getValue()) units.add(u);
+                }
+            }
+            ArrayNode failed = root.putArray("failed_units");
+            for (int u : failedUnits) failed.add(u);
             return mapper.writeValueAsString(root);
         } catch (Exception e) {
             log.warn("image extract failed", e);

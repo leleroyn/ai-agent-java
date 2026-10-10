@@ -261,8 +261,8 @@ public class PdfService {
         ObjectNode root = mapper.createObjectNode();
         boolean complete = failedPages.isEmpty() && !incomplete;
         root.put("status", complete ? "complete" : "partial");
-        root.put("total_pages", total);
-        ArrayNode scanned = root.putArray("pages_scanned");
+        root.put("total_units", total);
+        ArrayNode scanned = root.putArray("units_scanned");
         scanned.add(start);
         scanned.add(scanEnd);
         root.put("incomplete", incomplete);
@@ -280,16 +280,16 @@ public class PdfService {
                 ObjectNode r = results.addObject();
                 r.put("field", field);
                 r.putNull("value");
-                r.putArray("pages");
+                r.putArray("units");
                 continue;
             }
             for (var e : byValue.entrySet()) {
                 ObjectNode r = results.addObject();
                 r.put("field", field);
                 r.put("value", e.getKey());
-                ArrayNode pages = r.putArray("pages");
+                ArrayNode units = r.putArray("units");
                 for (int p : e.getValue()) {
-                    pages.add(p);
+                    units.add(p);
                 }
             }
         }
@@ -302,13 +302,13 @@ public class PdfService {
                 ObjectNode r = results.addObject();
                 r.put("field", e.getKey());
                 r.put("value", ve.getKey());
-                ArrayNode pages = r.putArray("pages");
+                ArrayNode units = r.putArray("units");
                 for (int p : ve.getValue()) {
-                    pages.add(p);
+                    units.add(p);
                 }
             }
         }
-        ArrayNode failed = root.putArray("failed_pages");
+        ArrayNode failed = root.putArray("failed_units");
         for (int p : failedPages) {
             failed.add(p);
         }

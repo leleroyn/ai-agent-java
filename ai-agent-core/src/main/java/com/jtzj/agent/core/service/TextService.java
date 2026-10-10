@@ -234,7 +234,7 @@ public class TextService {
         ObjectNode root = mapper.createObjectNode();
         boolean complete = failedChunks.isEmpty();
         root.put("status", complete ? "complete" : "partial");
-        root.put("total_chunks", totalChunks);
+        root.put("total_units", totalChunks);
         ArrayNode results = root.putArray("results");
         LinkedHashSet<String> emitted = new LinkedHashSet<>();
         for (String field : fields) {
@@ -244,15 +244,15 @@ public class TextService {
                 ObjectNode r = results.addObject();
                 r.put("field", field);
                 r.putNull("value");
-                r.putArray("pages");
+                r.putArray("units");
                 continue;
             }
             for (var e : byValue.entrySet()) {
                 ObjectNode r = results.addObject();
                 r.put("field", field);
                 r.put("value", e.getKey());
-                ArrayNode pages = r.putArray("pages");
-                for (int p : e.getValue()) pages.add(p);
+                ArrayNode units = r.putArray("units");
+                for (int p : e.getValue()) units.add(p);
             }
         }
         for (var e : acc.entrySet()) {
@@ -261,11 +261,11 @@ public class TextService {
                 ObjectNode r = results.addObject();
                 r.put("field", e.getKey());
                 r.put("value", ve.getKey());
-                ArrayNode pages = r.putArray("pages");
-                for (int p : ve.getValue()) pages.add(p);
+                ArrayNode units = r.putArray("units");
+                for (int p : ve.getValue()) units.add(p);
             }
         }
-        ArrayNode failed = root.putArray("failed_chunks");
+        ArrayNode failed = root.putArray("failed_units");
         for (int p : failedChunks) failed.add(p);
         return mapper.writeValueAsString(root);
     }
