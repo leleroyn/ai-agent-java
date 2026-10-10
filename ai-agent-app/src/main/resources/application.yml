@@ -89,12 +89,14 @@ agent:
     sys-prompt: >
       你是自动化任务代理，无人在线，禁止提问。
       规则：
-      - 指令自包含时直接回答，不调工具。
+      - 指令自包含时直接回答，不调工具；但指令里出现文件 URL 或文件路径时不算自包含：文件内容只能来自工具返回，禁止凭记忆或猜测写出字段值。
       - 你不能看图/PDF/TXT，绝对禁止 read-file 或 shell 打印图片/PDF/TXT内容；只能用专用工具处理。
       - 文档来源是 http(s) URL 或工作目录下的本地路径。
       - 要字段值 → extract_document_fields；要开放理解 → understand_document。
       - 任务是"找特定信息"时优先用 extract_document_fields。
       - 每个目标只调一次工具，第一次返回即权威，不得重复调用确认。
+      - extract_document_fields 的 value 就是权威结论：同一字段只会给一条 value，其余候选在 alternates 里，以 value 为准，不要自己挑。
+      - 只有当某字段返回 value=null、而指令确实要这个值时，才用 understand_document 补这一处；已经拿到值的字段不要再查一遍。
       - 涉及日期/时间必须调 get_system_time，禁止凭记忆推断。
       - 信息够了就输出结果并停止。
       - 指令或技能要求 JSON/结构化输出时，最终答案只输出 JSON 本身：不加解释、不加前后缀、不用 Markdown 代码围栏。
@@ -103,6 +105,9 @@ agent:
       - <available_skills> 中有匹配项时必须先 load_skill_through_path，然后严格遵循其输出要求。
       - 匹配的技能是强制性的，不是参考。先加载技能再写最终答案。
     max-iters: ${AGENT_MAX_ITERS:20}
+    # 指令里点名了文档文件、但整趟运行一个工具都没调 —— 答案只可能来自模型记忆（实测营业执照
+    # 任务 1.6s 返回了另一家公司的字段）。默认重试一次，仍不调工具就失败，绝不把编造值当结果。
+    force-document-tool: ${AGENT_FORCE_DOCUMENT_TOOL:true}
     # BYPASS is required for the "all tools" decision: in DONT_ASK mode every ASK
     # decision is demoted to DENY, which would silently block shell/write.
     # Deny rules and dangerous-path checks still apply even under BYPASS.
@@ -137,9 +142,12 @@ agent:
     # 每批交给视觉模型的页数（understand_document 单次上限；extract_document_fields 每批页数）。
     # 实际上限 = min(本值, agent.vision.max-images)。
     pages-per-call: ${AGENT_PDF_PAGES_PER_CALL:6}
-    # extract_document_fields 遍历整篇时的并发批数。
+    # 抽取阶段（分块调模型）的并发批数。
     concurrency: ${AGENT_PDF_CONCURRENCY:4}
-    # extract_document_fields 服务端最多扫描多少页（兜底）；超过只扫前 N 页并标 incomplete。
+    # 扫描版 PDF 逐页 OCR 的并发 worker 数；写入仍严格按页序，并发只发生在识别阶段，
+    # 页数 <= 2 时始终串行。format=md 单页慢约 4 倍，这里调高可以把 72 页那份的时间补回来。
+    ocr-parallelism: ${AGENT_PDF_OCR_PARALLELISM:2}
+    # 抽取类任务最多 OCR 多少页（成本兜底）；超过只识别前 N 页，并在 txt 末尾注明共几页。
     max-pages: ${AGENT_PDF_MAX_PAGES:200}
     # 栅格化最长边像素（控 token；0=不缩放）。pdftoppm -scale-to。
     max-image-dimension: ${AGENT_PDF_MAX_DIM:1568}
@@ -149,8 +157,12 @@ agent:
     # PDF 下载体积上限（字节），防 DoS。
     max-download-bytes: ${AGENT_PDF_MAX_DOWNLOAD_BYTES:209715200}
     # TXT 分块大小（字符）/ 重叠（防字段截断在块边界）。
-    text-chunk-size: ${AGENT_PDF_TEXT_CHUNK_SIZE:4000}
-    text-chunk-overlap: ${AGENT_PDF_TEXT_CHUNK_OVERLAP:200}
+    # 分块大小按抽取端点上下文定：qwenvl n_ctx=131072，40000 个中日韩字符约 4 万 token，
+    # 输入输出都还有余量（实测 72 页那份 7 万字符切成 2 块，甲方/乙方/金额/订立时间全对）。
+    # 块越大越少跨块丢字段、也越少归并时的互斥候选；OCR 文本有页标记，切分不会劈开字段值。
+    text-chunk-size: ${AGENT_PDF_TEXT_CHUNK_SIZE:40000}
+    # 页边界打包用不到重叠；退回字符窗口时留一点，避免正好劈开一个值。
+    text-chunk-overlap: ${AGENT_PDF_TEXT_CHUNK_OVERLAP:400}
     # SSRF 主机白名单（后缀匹配）；留空=允许任意 http/https（与图片工具一致）。
     # ssrf-allowlist:
     #   - internal.example
@@ -169,16 +181,22 @@ agent:
     rasterize-dpi: ${AGENT_OCR_DPI:300}
     max-image-dimension: ${AGENT_OCR_MAX_DIM:0}
     jpeg-quality: ${AGENT_OCR_JPEG_QUALITY:90}
-    # 表单参数：resize=服务端缩放（快）；use_cls=方向检测（慢）；format=txt(OpenOCR 快)/md(vLLM 慢)。
+    # 表单参数：resize=服务端缩放（快）；use_cls=方向检测（慢）。
     resize: ${AGENT_OCR_RESIZE:true}
     use-cls: ${AGENT_OCR_USE_CLS:false}
-    format: ${AGENT_OCR_FORMAT:txt}
+    # format：txt=OpenOCR，单页快约 4 倍，但会丢字段标签（实测营业执照的「注册资本」标签在 txt
+    # 里整个消失，只剩裸数值，抽取只能靠猜）；md=走 vLLM，保留标签与版面，抽取召回明显更好。
+    # 默认 md：抽取质量优先，时间用 agent.pdfs.ocr-parallelism 补。
+    format: ${AGENT_OCR_FORMAT:md}
     # 渠道标识，便于 OCR 服务端统计；留空=不下发。
     app-id: ${AGENT_OCR_APP_ID:ai-agent-java}
 
   tools:
     # Decision: expose all built-in tools. Requires permission-mode BYPASS.
     shell: ${AGENT_TOOL_SHELL:true}
+    # read-file 一个开关同时提供 view_text_file 和 list_directory。抽取类服务建议置 false：
+    # 关掉之后模型只剩 get_system_time / extract_document_fields / understand_document，
+    # 没有任何办法把 OCR 中间文件读进主模型上下文（框架的 deny 规则只能按工具名拦，做不到按路径）。
     read-file: ${AGENT_TOOL_READ:true}
     write-file: ${AGENT_TOOL_WRITE:true}
     todo: ${AGENT_TOOL_TODO:true}

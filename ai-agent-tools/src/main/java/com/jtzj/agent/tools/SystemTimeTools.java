@@ -1,5 +1,6 @@
 package com.jtzj.agent.tools;
 
+import io.agentscope.core.message.ToolResultBlock;
 import io.agentscope.core.tool.Tool;
 import io.agentscope.core.tool.ToolParam;
 
@@ -53,7 +54,7 @@ public class SystemTimeTools {
                     + "返回本地时间、ISO-8601、星期、Unix 时间戳，以及可选的偏移目标日期。",
             readOnly = true,
             concurrencySafe = true)
-    public String getSystemTime(
+    public ToolResultBlock getSystemTime(
             @ToolParam(
                     name = "timezone",
                     description = "IANA 时区名，例如 Asia/Shanghai、UTC、America/New_York；"
@@ -72,6 +73,10 @@ public class SystemTimeTools {
                     description = "相对当前时刻的偏移小时数，可为负；与 offset_days 可叠加。省略记为 0",
                     required = false)
             Integer offsetHours) {
+        return ToolResults.text(getSystemTimeImpl(timezone, offsetDays, offsetHours));
+    }
+
+    private String getSystemTimeImpl(String timezone, Integer offsetDays, Integer offsetHours) {
 
         ZoneId zone;
         try {

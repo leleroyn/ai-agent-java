@@ -5,6 +5,7 @@ import com.jtzj.agent.core.service.PdfService;
 import com.jtzj.agent.core.service.TextService;
 import com.jtzj.agent.core.service.VisionClient;
 import com.jtzj.agent.core.support.MediaInputs;
+import io.agentscope.core.message.ToolResultBlock;
 import io.agentscope.core.tool.Tool;
 import io.agentscope.core.tool.ToolParam;
 import java.nio.file.Path;
@@ -42,7 +43,7 @@ public class DocumentUnderstandTools {
                     + "混合类型时分别处理各类型结果拼接，不跨类型对比。返回自然语言文本。",
             readOnly = true,
             concurrencySafe = true)
-    public String understand(
+    public ToolResultBlock understand(
             @ToolParam(
                     name = "source",
                     description = "文档来源，一个或多个，空格或换行分隔。每项是 http/https URL 或本任务工作目录下的本地文件路径（可混用）。"
@@ -59,6 +60,10 @@ public class DocumentUnderstandTools {
                     description = "可选，仅对 PDF 有效：\"a-b\"、\"a\"、\"a-\"。留空=处理全部。",
                     required = false)
             String pageRange) {
+        return ToolResults.text(understandImpl(source, question, pageRange));
+    }
+
+    private String understandImpl(String source, String question, String pageRange) {
 
         if (question == null || question.isBlank()) {
             return "Error: question 不能为空，请说明要对文档做什么。";

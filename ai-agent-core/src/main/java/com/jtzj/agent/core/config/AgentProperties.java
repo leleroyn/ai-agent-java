@@ -336,6 +336,11 @@ public class AgentProperties {
                 + "When the instruction depends on the current date or time, call get_system_time instead of guessing. "
                 + "For date arithmetic (for example a date N days from now), use get_system_time with offset_days; never run shell date commands.";
         private int maxIters = 20;
+        /**
+         * Fail a document task whose run never called a tool, instead of returning whatever the
+         * model recalled. Off switches the guard back to log-only.
+         */
+        private boolean forceDocumentTool = true;
         /** PermissionMode name: DEFAULT | ACCEPT_EDITS | EXPLORE | BYPASS | DONT_ASK */
         private String permissionMode = "BYPASS";
 
@@ -353,6 +358,14 @@ public class AgentProperties {
 
         public void setSysPrompt(String sysPrompt) {
             this.sysPrompt = sysPrompt;
+        }
+
+        public boolean isForceDocumentTool() {
+            return forceDocumentTool;
+        }
+
+        public void setForceDocumentTool(boolean forceDocumentTool) {
+            this.forceDocumentTool = forceDocumentTool;
         }
 
         public int getMaxIters() {
@@ -759,11 +772,16 @@ public class AgentProperties {
          * 每批喂多少页）。实际上限 = {@code min(本值, agent.vision.max-images)}。
          */
         private int pagesPerCall = 6;
-        /** {@code extract_document_fields} 遍历整篇时的并发批数。 */
+        /** {@code extract_document_fields} 遍历整篇时的并发批数（抽取阶段的分块并发）。 */
         private int concurrency = 4;
         /**
-         * {@code extract_document_fields} 服务端最多扫描多少页（召回与成本的兜底）。超过则只扫前 N 页
-         * 并在结果里标 {@code incomplete=true}，由主模型决定是否用 page_range 续扫。
+         * 扫描版 PDF 逐页 OCR 的并发 worker 数。写入仍严格按页序（一批内先全部识别完、再按页号落盘），
+         * 并发只发生在识别阶段；页数 &lt;= 2 时始终串行。{@code format=md} 单页明显更慢，这里调高能补回来。
+         */
+        private int ocrParallelism = 2;
+        /**
+         * 抽取类任务最多 OCR 多少页（成本兜底）。超过则只识别前 N 页，并在 txt 末尾写明
+         * 「共 X 页，只识别了前 N 页」，抽取结果只覆盖已识别的部分。
          */
         private int maxPages = 200;
         /** 栅格化最长边像素（控 token）；0=不缩放。pdftoppm -scale-to。 */
@@ -774,10 +792,14 @@ public class AgentProperties {
         private int timeoutSeconds = 120;
         /** PDF 下载体积上限（字节），防 DoS。 */
         private int maxDownloadBytes = 200 * 1024 * 1024;
-        /** TXT 分块大小（字符数），每块独立调视觉模型抽取。 */
-        private int textChunkSize = 4000;
-        /** TXT 分块重叠（字符数），防止字段被截断在块边界。 */
-        private int textChunkOverlap = 200;
+        /**
+         * TXT 分块大小（字符数），每块独立调模型抽取。按抽取端点的上下文定：视觉端点
+         * n_ctx=131072，40000 个中日韩字符约 4 万 token，输入输出都留有余量。
+         * 块越大越少「字段值正好落在块边界」和跨块互斥候选，代价是单次调用更慢。
+         */
+        private int textChunkSize = 40000;
+        /** TXT 分块重叠（字符数）：只在没有页标记、退回字符窗口时才用得到。 */
+        private int textChunkOverlap = 400;
         /**
          * SSRF 主机白名单（按后缀匹配，如 {@code internal.example}）；空=允许任意 http/https（与图片工具一致）。
          */
@@ -805,6 +827,14 @@ public class AgentProperties {
 
         public void setConcurrency(int concurrency) {
             this.concurrency = Math.max(1, concurrency);
+        }
+
+        public int getOcrParallelism() {
+            return ocrParallelism;
+        }
+
+        public void setOcrParallelism(int ocrParallelism) {
+            this.ocrParallelism = Math.max(1, ocrParallelism);
         }
 
         public int getMaxPages() {
@@ -896,8 +926,12 @@ public class AgentProperties {
         private boolean resize = true;
         /** 表单字段 use_cls：服务端是否跑方向检测模型（true 更慢）。 */
         private boolean useCls = false;
-        /** 表单字段 format：txt=OpenOCR（快）；md=走 vLLM（慢）。 */
-        private String format = "txt";
+        /**
+         * 表单字段 format：{@code txt}=OpenOCR（快，但会丢字段标签——实测营业执照的「注册资本」标签
+         * 在 txt 结果里整个消失，只剩裸数值）；{@code md}=走 vLLM（单页慢约 4 倍，但保留标签与版面，
+         * 抽取召回明显更好）。默认 md。
+         */
+        private String format = "md";
         /** 表单字段 app_id：渠道标识，便于服务端统计；留空不下发。 */
         private String appId = "ai-agent-java";
 

@@ -2,8 +2,15 @@ package com.jtzj.agent.core.support;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 
 /**
  * 视觉模型结构化输出的宽松解析：把 VL 可能夹带解释/代码围栏的返回文本，抠出第一段平衡的
@@ -132,5 +139,114 @@ public final class Extraction {
             }
         }
         return new ArrayList<>(set);
+    }
+
+    /**
+     * 归并成最终契约。
+     *
+     * <p><b>每个请求字段恰好一条 {@code value}</b>：多个候选值时取权威值，其余进
+     * {@code alternates}（带 units）。之前同名字段直接摊成多条互斥的 results，模型分不清
+     * 哪条权威，只能再调别的工具自查（实测 72 页那份 {@code 甲方/乙方/合同金额} 各出现两次，
+     * 其中一条还是印章 OCR 碎片）。抽取器自己补出来的、未被请求的字段进 {@code extra}，
+     * 不与 {@code results} 混在一起。
+     *
+     * <p>权威值排序：非占位符优先 → 出现次数多优先 → 首次出现更早优先。占位符（{@code --}、
+     * {@code 无}、{@code /} 这类）不会压过真实值，但文档里真的只有占位符时仍会原样返回。
+     *
+     * @param acc        字段 -&gt; (值 -&gt; 命中单元集合)
+     * @param failedUnits 失败的块/来源序号
+     * @param totalUnits  总块数/来源数
+     */
+    public static String merge(ObjectMapper mapper,
+                               List<String> fields,
+                               LinkedHashMap<String, LinkedHashMap<String, TreeSet<Integer>>> acc,
+                               TreeSet<Integer> failedUnits,
+                               int totalUnits) throws Exception {
+        ObjectNode root = mapper.createObjectNode();
+        root.put("status", failedUnits == null || failedUnits.isEmpty() ? "complete" : "partial");
+        root.put("total_units", totalUnits);
+
+        ArrayNode results = root.putArray("results");
+        for (String field : fields) {
+            ObjectNode r = results.addObject();
+            r.put("field", field);
+            LinkedHashMap<String, TreeSet<Integer>> byValue = acc.get(field);
+            if (byValue == null || byValue.isEmpty()) {
+                r.putNull("value");
+                r.putArray("units");
+                continue;
+            }
+            List<Map.Entry<String, TreeSet<Integer>>> ranked = rank(byValue);
+            Map.Entry<String, TreeSet<Integer>> top = ranked.get(0);
+            r.put("value", top.getKey());
+            addUnits(r.putArray("units"), top.getValue());
+            if (ranked.size() > 1) {
+                ArrayNode alternates = r.putArray("alternates");
+                for (int i = 1; i < ranked.size(); i++) {
+                    ObjectNode a = alternates.addObject();
+                    a.put("value", ranked.get(i).getKey());
+                    addUnits(a.putArray("units"), ranked.get(i).getValue());
+                }
+            }
+        }
+
+        ArrayNode extra = null;
+        for (Map.Entry<String, LinkedHashMap<String, TreeSet<Integer>>> e : acc.entrySet()) {
+            if (fields.contains(e.getKey())) {
+                continue;
+            }
+            if (extra == null) {
+                extra = root.putArray("extra");
+            }
+            for (Map.Entry<String, TreeSet<Integer>> ve : e.getValue().entrySet()) {
+                ObjectNode o = extra.addObject();
+                o.put("field", e.getKey());
+                o.put("value", ve.getKey());
+                addUnits(o.putArray("units"), ve.getValue());
+            }
+        }
+
+        ArrayNode failed = root.putArray("failed_units");
+        if (failedUnits != null) {
+            for (int u : failedUnits) {
+                failed.add(u);
+            }
+        }
+        return mapper.writeValueAsString(root);
+    }
+
+    /** 权威值排序：非占位符优先，再按出现次数、首次出现位置。 */
+    private static List<Map.Entry<String, TreeSet<Integer>>> rank(
+            LinkedHashMap<String, TreeSet<Integer>> byValue) {
+        List<Map.Entry<String, TreeSet<Integer>>> list = new ArrayList<>(byValue.entrySet());
+        list.sort(Comparator
+                .comparing((Map.Entry<String, TreeSet<Integer>> e) -> isPlaceholder(e.getKey()))
+                .thenComparing(e -> -e.getValue().size())
+                .thenComparing(e -> e.getValue().isEmpty() ? Integer.MAX_VALUE : e.getValue().first()));
+        return list;
+    }
+
+    /** 只有标点/占位词的值：不能当权威值，但也不能凭空丢掉。 */
+    private static boolean isPlaceholder(String value) {
+        if (value == null) {
+            return true;
+        }
+        String s = value.trim();
+        if (s.isEmpty()) {
+            return true;
+        }
+        if (PLACEHOLDER_WORDS.contains(s)) {
+            return true;
+        }
+        return s.replaceAll("[\\s\\-—–_/·.、，,()（）\\[\\]]", "").isEmpty();
+    }
+
+    private static final Set<String> PLACEHOLDER_WORDS = Set.of(
+            "无", "空", "未知", "待定", "略", "不适用", "n/a", "N/A", "na", "null");
+
+    private static void addUnits(ArrayNode units, TreeSet<Integer> values) {
+        for (int u : values) {
+            units.add(u);
+        }
     }
 }

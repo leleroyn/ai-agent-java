@@ -449,15 +449,24 @@ UPDATE agent_task SET callback_status='pending'
 
 ```json
 {"status":"complete","total_units":2,
- "results":[{"field":"签订日期","value":"2026年3月18日","units":[1]}],
+ "results":[{"field":"签订日期","value":"2026年3月18日","units":[1]},
+            {"field":"甲方","value":"中交二航局第一工程有限公司","units":[1],
+             "alternates":[{"value":"中交二航局第一工程有限公司（盖章）","units":[2]}]}],
  "failed_units":[]}
 ```
 
 - **每个请求的字段都恰好出现一条**；文档里确实没有时 `value` 是 JSON `null`、`units` 是空数组。这是服务端写死的口径，不是模型措辞——下游按 `value === null` 判缺失，不要匹配「未提及」这类文案。
-- `units` 含义随类型变化：图片=图序号、PDF=页码、TXT=段号。同一字段抽到多个不同值时会出现多条，各带自己的 `units`。
+- `units` 含义：单个来源时＝文本块序号（按字符切块，不是页码）；多个来源时＝来源序号（按 `source` 里的顺序，从 1 起）。
+- 同一字段抽到多个不同值时**不会**摊成多条互斥结果：`value` 是权威值（非占位符优先 → 出现次数多优先 → 首次出现更早优先），其余候选放进 `alternates`，各带自己的 `units`。这样下游不必再猜哪条算数、也不必换工具自查。
+- 抽取器自己补出来的、未被请求的字段进 `extra`，不与 `results` 混在一起。
 - `status`：`complete`＝所有单元都成功；`partial`＝有单元失败，失败单元在 `failed_units`。
-- PDF 结果额外带 `pipeline`：`ocr`＝含图片的页或文字层不可用的页走了 OCR 文本通道；`vision`＝逐页栅格化喂视觉模型。
+- 抽取管线只有一条：图片/PDF 先 OCR 成文本（PDF 逐页识别、按页追加到 `.ocr/` 下的同名 `.txt`，每页前有 `--- 第 N 页 ---`），再按字符切块抽取。没有页型探测，也没有视觉/OCR 双通道回退。
+- OCR 原文只出现在任务目录的 `.ocr/` 子目录里：工具返回值不含该路径，全文也不常驻内存（按块读）。它在**整次任务内保留**，任务跑完由服务端删掉整个 `.ocr/`，原文不留盘。
+- 一次任务内同一来源只 OCR 一次：txt 路径按来源缓存，换一批字段再调用直接复用已识别的文本（不缓存的话，模型先抽 5 个字段再补抽 1 个就会把 72 页重新识别一遍）。同样的「来源 + 字段」还有一层结果缓存，重复调用返回同一份结果。
+- 藏进子目录本身拦不住模型（`list_directory` 不过滤点开头目录，`view_text_file` 也不校验后缀），所以隔离靠不注册读文件的工具，见下一条。
+- 想彻底断掉「模型换工具自查」，就把内置文件工具关掉：`AGENT_TOOL_READ=false`（同时去掉 `view_text_file` 和 `list_directory`）、必要时 `AGENT_TOOL_SHELL=false`。框架的权限规则只能按工具名 deny，做不到按路径，所以路径级隔离只能靠不注册工具。
 - OCR 文本通道**只用于字段抽取**。`understand_document` 对 PDF 始终走视觉，因为 OCR 文本会丢掉版面与图形信息。
+- **文档类指令必须真的读文件**：指令里点名了文档文件（`http(s)` URL 带 pdf/jpg/png/txt/… 后缀）、但整趟运行一个工具都没调时，服务端会带「必须先调工具」的硬约束重试一次；仍不调工具就 `status=failed` + `error.code=NO_RESULT`，绝不把模型凭记忆编出来的字段值当结果返回。要退回「只告警不拦截」，设 `AGENT_FORCE_DOCUMENT_TOOL=false`。
 
 ---
 

@@ -1,0 +1,334 @@
+package com.jtzj.agent.core.service;
+
+import com.jtzj.agent.core.config.AgentProperties;
+import com.jtzj.agent.core.support.SandboxPaths;
+import java.io.BufferedWriter;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Component;
+
+/**
+ * 抽取类任务的统一入口：图片 / PDF 先 OCR 换文本，落成任务目录里的同名 {@code .txt}，
+ * 再交给 {@link TextService} 按块抽取。
+ *
+ * <p>为什么统一走 OCR：视觉模型读长数字/字母串不可靠（实测把 18 位统一社会信用代码读丢一位），
+ * 而字段抽取要的正是这些值。页型探测 + 视觉/OCR 双通道那套判定链因此整体消失。
+ *
+ * <p>PDF <b>逐页 OCR、边识别边追加</b>到同一个 txt：一次请求换整份文本容易超时，逐页则每页一次
+ * 小请求，中途失败也已留下前面页的文本。页数 &gt; 2 时用 2 个并发 worker，但<b>写入严格按页序</b>
+ * （一批内先全部识别完、再按页号顺序落盘）。每页前写 {@code --- 第 N 页 ---} 便于溯源。
+ * 图片一次 OCR。
+ *
+ * <p>OCR 文本落在任务目录的 {@code .ocr/} 子目录，<b>不进主模型上下文</b>：工具只返回归并后的字段
+ * 值，返回值里不出现这个路径。藏进子目录本身拦不住模型——框架的 list_directory 用 {@code Files.list}
+ * （不过滤点开头目录），view_text_file 也不校验后缀，只校验路径在沙箱内。真正的隔离靠部署侧关掉
+ * {@code agent.tools.read-file} 并把 shell 白名单收成 curl：模型没有读文件的入口。
+ * 本次运行内同一来源只 OCR 一次（{@code DocumentExtractTools} 缓存 txt 路径），换一批字段直接复用；
+ * 整次任务跑完由 {@code AgentTaskRunner} 删掉整个 {@code .ocr/}，原文不留盘。
+*/
+@Component
+public class OcrTextService {
+
+    private static final Logger log = LoggerFactory.getLogger(OcrTextService.class);
+    private static final String SOURCE_NAME = "ocr-source";
+    /** OCR 文本与临时页图的去向：仍在任务沙箱内，整次任务跑完后由 {@code AgentTaskRunner} 清掉。 */
+    public static final String SCRATCH_DIR = ".ocr";
+    /** PDF 页数超过该值才开并发（1-2 页串行更省一次握手）。 */
+    private static final int PARALLEL_ABOVE_PAGES = 2;
+
+    private final AgentProperties props;
+    private final OcrClient ocrClient;
+    private final PdfService pdfService;
+    private final HttpClient http;
+
+    public OcrTextService(AgentProperties props, OcrClient ocrClient, PdfService pdfService) {
+        this.props = props;
+        this.ocrClient = ocrClient;
+        this.pdfService = pdfService;
+        this.http = HttpClient.newBuilder()
+        .connectTimeout(java.time.Duration.ofSeconds(20))
+        .followRedirects(HttpClient.Redirect.NORMAL)
+        .build();
+    }
+
+    /**
+     * 把一份图片/PDF 转成任务目录里的文本文件。
+     *
+     * @param source  http/https URL，或任务工作目录内的相对路径
+     * @param taskDir 任务沙箱目录
+     * @return 成功时返回 txt 在任务目录内的相对路径（{@code .ocr/xxx.txt}）；失败时返回 {@code "Error: ..."}
+    */
+    public String toTextFile(String source, Path taskDir) {
+        if (!ocrClient.isEnabled()) {
+            return "Error: OCR 通道未启用（agent.ocr.enabled=false 或未配 agent.ocr.base-url），抽取无法进行。";
+        }
+        int maxBytes = props.getPdfs().getMaxDownloadBytes();
+        Path file;
+        Path scratch = null;
+        boolean downloaded = false;
+        try {
+            scratch = scratchDir(taskDir);
+            if (isHttpUrl(source)) {
+                file = download(URI.create(source.trim()), scratch, maxBytes);
+                downloaded = true;
+            } else {
+                file = SandboxPaths.resolveWithin(taskDir, source);
+                if (file == null || !Files.isRegularFile(file)) {
+                    return "Error: 本地文件必须在任务工作目录内且存在：" + source;
+                }
+            }
+            if (Files.size(file) == 0) {
+                return "Error: 文件为空。";
+            }
+            Path out = scratch.resolve(uniqueTxtName(scratch, baseName(source)));
+            String error = isPdf(file)
+            ? ocrPdfPerPage(file, out, source, scratch)
+            : ocrWholeFile(file, out, source);
+            return error == null ? SCRATCH_DIR + "/" + out.getFileName() : error;
+        } catch (Exception e) {
+            log.warn("ocr->txt failed for {}: {}", source, e.toString());
+            return "Error: 转文本失败：" + e.getClass().getSimpleName() + ": " + e.getMessage();
+        } finally {
+            if (downloaded && scratch != null) {
+                try {
+                    Files.deleteIfExists(scratch.resolve(SOURCE_NAME));
+                } catch (Exception ignored) {
+                    // 清理失败不影响结果
+                }
+            }
+        }
+    }
+
+    /** 图片等非 PDF 文件：一次 OCR。 */
+    /** @return 失败原因；{@code null} 表示成功 */
+    private String ocrWholeFile(Path file, Path out, String source) throws Exception {
+        byte[] bytes = Files.readAllBytes(file);
+        String text = ocrClient.ocr(bytes, file.getFileName().toString());
+        if (text.startsWith("Error:")) {
+            return text;
+        }
+        if (text.isBlank()) {
+            return "Error: OCR 没有识别出任何文字（可能是纯图形或分辨率过低）。";
+        }
+        Files.writeString(out, text, StandardCharsets.UTF_8);
+        log.info("ocr->txt src={} bytes={} chars={} file={}", source, bytes.length, text.length(), out);
+        return null;
+    }
+
+    /**
+     * PDF：按 {@code agent.pdf.pages-per-call} 分批栅格化，每批内 OCR（页数 &gt; 2 时 2 并发），
+     * 一批识别完再按页号顺序追加写入同一个 txt。单页失败只记录、继续；全部失败才报错。
+    */
+    /** @return 失败原因；{@code null} 表示成功 */
+    private String ocrPdfPerPage(Path pdf, Path out, String source, Path scratch) throws Exception {
+        int total = pdfService.pageCount(pdf);
+        int maxPages = props.getPdfs().getMaxPages();
+        int limit = Math.min(total, Math.max(1, maxPages));
+        int batch = Math.max(1, props.getPdfs().getPagesPerCall());
+        int parallelism = props.getPdfs().getOcrParallelism();
+        boolean parallel = limit > PARALLEL_ABOVE_PAGES && parallelism > 1;
+        List<Integer> failed = new ArrayList<>();
+        int ok = 0;
+        int chars = 0;
+        long started = System.currentTimeMillis();
+        ExecutorService exec = parallel ? Executors.newFixedThreadPool(parallelism) : null;
+        try (BufferedWriter w = Files.newBufferedWriter(out, StandardCharsets.UTF_8)) {
+            for (int a = 1; a <= limit; a += batch) {
+                int b = Math.min(limit, a + batch - 1);
+                List<byte[]> pages;
+                try {
+                    pages = pdfService.renderPageImages(pdf, a, b, scratch);
+                } catch (Exception e) {
+                    log.warn("rasterize pages {}-{} failed: {}", a, b, e.toString());
+                    for (int p = a; p <= b; p++) {
+                        failed.add(p);
+                    }
+                    continue;
+                }
+                String[] texts = ocrBatch(pages, a, exec);
+                for (int i = 0; i < texts.length; i++) {
+                    int page = a + i;
+                    String text = texts[i];
+                    if (text == null || text.startsWith("Error:")) {
+                        log.warn("ocr page {} failed: {}", page, text);
+                        failed.add(page);
+                        continue;
+                    }
+                    w.write("--- 第 " + page + " 页 ---\n");
+                    w.write(text);
+                    if (!text.endsWith("\n")) {
+                        w.write("\n");
+                    }
+                    ok++;
+                    chars += text.length();
+                }
+                w.flush();
+                log.info("ocr->txt page {}/{} ok={} chars={} parallel={} elapsed={}ms",
+                        b, limit, ok, chars, parallel, System.currentTimeMillis() - started);
+            }
+            if (total > limit) {
+                w.write("--- 说明：文档共 " + total + " 页，只识别了前 " + limit + " 页 ---\n");
+            }
+        } finally {
+            if (exec != null) {
+                exec.shutdownNow();
+            }
+            cleanPageImages(scratch);
+        }
+        if (ok == 0) {
+            Files.deleteIfExists(out);
+            return "Error: PDF 共 " + limit + " 页，逐页 OCR 全部失败"
+            + (failed.isEmpty() ? "" : "（失败页 " + failed + "）") + "。";
+        }
+        log.info("ocr->txt pdf src={} pages={}/{} failed={} chars={} parallel={} file={} elapsed={}ms",
+        source, ok, limit, failed, chars, parallel, out, System.currentTimeMillis() - started);
+        return null;
+    }
+
+    /**
+     * 一批页的 OCR。{@code exec} 为空则串行；否则并发提交、按提交顺序取回，
+     * 返回值下标 i 对应第 {@code firstPage + i} 页——并发只发生在识别阶段，顺序由这里保证。
+    */
+    private String[] ocrBatch(List<byte[]> pages, int firstPage, ExecutorService exec) {
+        String[] texts = new String[pages.size()];
+        if (exec == null) {
+            for (int i = 0; i < pages.size(); i++) {
+                texts[i] = ocrClient.ocr(pages.get(i), "page-" + (firstPage + i) + ".jpg");
+            }
+            return texts;
+        }
+        List<Future<String>> futures = new ArrayList<>(pages.size());
+        for (int i = 0; i < pages.size(); i++) {
+            final byte[] image = pages.get(i);
+            final String filename = "page-" + (firstPage + i) + ".jpg";
+            futures.add(exec.submit(() -> ocrClient.ocr(image, filename)));
+        }
+        for (int i = 0; i < futures.size(); i++) {
+            try {
+                texts[i] = futures.get(i).get();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                texts[i] = "Error: OCR 被中断（页 " + (firstPage + i) + "）";
+                break;
+            } catch (Exception e) {
+                texts[i] = "Error: OCR 异常：" + e.getClass().getSimpleName() + ": " + e.getMessage();
+            }
+        }
+        return texts;
+    }
+
+    /** pdftoppm 中途失败可能留下页图，统一清掉（正常路径 rasterizeBytes 读完即删）。 */
+    private static void cleanPageImages(Path dir) {
+        try (var stream = Files.list(dir)) {
+            stream.filter(p -> {
+                String n = p.getFileName().toString();
+                return n.startsWith("ocrpg") && n.toLowerCase().endsWith(".jpg");
+            }).forEach(p -> {
+                try {
+                    Files.deleteIfExists(p);
+                } catch (Exception ignored) {
+                    // 清理失败不影响结果
+                }
+            });
+        } catch (Exception ignored) {
+            // 列目录失败不影响结果
+        }
+    }
+
+    /**
+     * OCR 产物目录：{@code <任务目录>/.ocr}。仍在任务沙箱内，只是不与任务产物混在一起；
+     * 真正的隔离是抽取用完由调用方删掉这个文件（见 DocumentExtractTools.dropScratch）。
+    */
+    private static Path scratchDir(Path taskDir) throws Exception {
+        Path dir = taskDir.resolve(SCRATCH_DIR);
+        Files.createDirectories(dir);
+        return dir;
+    }
+
+    private static boolean isPdf(Path file) throws Exception {
+        byte[] head = new byte[5];
+        try (InputStream in = Files.newInputStream(file)) {
+            int n = in.read(head);
+            if (n < 5) {
+                return false;
+            }
+        }
+        return head[0] == '%' && head[1] == 'P' && head[2] == 'D' && head[3] == 'F' && head[4] == '-';
+    }
+
+    /** URL 末段或本地文件名去掉扩展名，作为 txt 名；非法字符换成下划线。 */
+    private static String baseName(String source) {
+        String s = source.trim();
+        int q = s.indexOf('?');
+        if (q >= 0) {
+            s = s.substring(0, q);
+        }
+        int slash = Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\'));
+        if (slash >= 0) {
+            s = s.substring(slash + 1);
+        }
+        int dot = s.lastIndexOf('.');
+        if (dot > 0) {
+            s = s.substring(0, dot);
+        }
+        s = s.replaceAll("[^0-9A-Za-z._-]", "_");
+        return s.isBlank() ? "document" : s;
+    }
+
+    private static String uniqueTxtName(Path dir, String base) {
+        String candidate = base + ".txt";
+        for (int i = 2; Files.exists(dir.resolve(candidate)); i++) {
+            candidate = base + "-" + i + ".txt";
+        }
+        return candidate;
+    }
+
+    private Path download(URI uri, Path dir, int maxBytes) throws Exception {
+        Path target = dir.resolve(SOURCE_NAME);
+        HttpRequest req = HttpRequest.newBuilder(uri).timeout(java.time.Duration.ofSeconds(180)).GET().build();
+        HttpResponse<InputStream> resp = http.send(req, HttpResponse.BodyHandlers.ofInputStream());
+        if (resp.statusCode() / 100 != 2) {
+            throw new IllegalStateException("下载文件失败 HTTP " + resp.statusCode());
+        }
+        long total = 0;
+        try (InputStream in = resp.body(); OutputStream os = Files.newOutputStream(target)) {
+            byte[] buf = new byte[64 * 1024];
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                total += n;
+                if (total > maxBytes) {
+                    Files.deleteIfExists(target);
+                    throw new IllegalStateException("文件超过体积上限 " + maxBytes + " 字节");
+                }
+                os.write(buf, 0, n);
+            }
+        }
+        if (total == 0) {
+            Files.deleteIfExists(target);
+            throw new IllegalStateException("下载到的文件为空");
+        }
+        return target;
+    }
+
+    private static boolean isHttpUrl(String s) {
+        if (s == null) {
+            return false;
+        }
+        String t = s.trim().toLowerCase();
+        return t.startsWith("http://") || t.startsWith("https://");
+    }
+}

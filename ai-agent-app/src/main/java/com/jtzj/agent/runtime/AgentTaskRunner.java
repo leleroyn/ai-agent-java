@@ -20,7 +20,10 @@ import reactor.core.publisher.Mono;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeoutException;
+import java.util.regex.Pattern;
 import com.jtzj.agent.core.error.AgentException;
 import com.jtzj.agent.core.error.ErrorCodes;
 
@@ -38,6 +41,14 @@ public class AgentTaskRunner {
 
     /** Metadata key AgentScope stores parsed structured output under. */
     private static final String STRUCTURED_OUTPUT_KEY = "_structured_output";
+
+    /**
+     * An instruction that names a document file. Such a task must be answered from tool output:
+     * measured once, the model answered a business-license image task in 1.6s with no tool call at
+     * all and invented another company's fields.
+     */
+    private static final Pattern DOCUMENT_REFERENCE = Pattern.compile(
+            "(?i)https?://\\S*\\.(?:pdf|jpe?g|png|webp|bmp|gif|txt|docx?|xlsx?|pptx?)(?![0-9A-Za-z])");
 
     private final AgentProperties props;
     private final ModelFactory modelFactory;
@@ -84,7 +95,19 @@ public class AgentTaskRunner {
     public RunOutcome run(String taskId, String instruction, JsonNode schema,
                           List<String> skills, Duration budget, String modelName) {
         Path taskDir = workspaceFactory.create(taskId);
-        ReActAgent agent = newAgent(taskDir, skills, modelName);
+        try {
+            return runInWorkspace(taskId, instruction, schema, skills, budget, modelName, taskDir);
+        } finally {
+            // OCR 中间文本只在本次运行内有意义（同一来源换字段不再重识别）；跑完即删，原文不留盘。
+            workspaceFactory.deleteScratch(taskDir);
+        }
+    }
+
+    private RunOutcome runInWorkspace(String taskId, String instruction, JsonNode schema,
+                                      List<String> skills, Duration budget, String modelName,
+                                      Path taskDir) {
+        Set<String> invokedTools = ConcurrentHashMap.newKeySet();
+        ReActAgent agent = newAgent(taskDir, skills, modelName, invokedTools);
         RuntimeContext ctx = RuntimeContext.builder()
                 .sessionId("task-" + taskId)
                 .userId("agent-service")
@@ -98,8 +121,6 @@ public class AgentTaskRunner {
                 : "已加载的技能规范（必须严格遵循，不要再调用 load_skill_through_path 加载它们）：\n\n"
                         + skillBlock + "\n任务指令：\n" + instruction;
 
-        List<Msg> messages = List.of(new UserMessage(prompt));
-
         AgentProperties.StructuredOutputMode mode = props.resolveModel(modelName).getStructuredOutputMode();
         // TWO_PHASE / OFF：第一趟不带 schema 跑，让 understand_image 等工具能正常调用
         // （带 schema 时 llama.cpp 会因 response_format 语法约束抑制工具调用）。TWO_PHASE 再补
@@ -108,13 +129,18 @@ public class AgentTaskRunner {
                 && (mode == AgentProperties.StructuredOutputMode.TWO_PHASE
                         || mode == AgentProperties.StructuredOutputMode.OFF);
 
-        Mono<Msg> call = (schema == null || freeFormFirst)
-                ? agent.call(messages, ctx)
-                : agent.call(messages, schema, ctx);
-
-        Msg reply = await(taskId, call, budget);
+        long startedAt = System.nanoTime();
+        Msg reply = await(taskId, call(agent, prompt, schema, freeFormFirst, ctx), budget);
         if (reply == null) {
             throw new AgentException(ErrorCodes.NO_RESULT, "agent returned no message", true);
+        }
+        if (ungroundedAnswer(instruction, invokedTools)) {
+            reply = answerGroundedInTools(taskId, instruction, taskDir, skills, modelName, prompt, schema,
+                    freeFormFirst, ctx, invokedTools, budget, startedAt);
+            if (reply == null) {
+                throw new AgentException(ErrorCodes.NO_RESULT,
+                        "document instruction answered without any tool call (guard disabled)", false);
+            }
         }
 
         String text = safeText(reply);
@@ -132,7 +158,60 @@ public class AgentTaskRunner {
         return new RunOutcome(result, text, reply.getUsage(), taskDir);
     }
 
-    private ReActAgent newAgent(Path taskDir, List<String> skills, String modelName) {
+    /** One agent turn: schema rides along only when the first pass may stay free-form. */
+    private static Mono<Msg> call(ReActAgent agent, String prompt, JsonNode schema,
+                                  boolean freeFormFirst, RuntimeContext ctx) {
+        List<Msg> messages = List.of(new UserMessage(prompt));
+        return (schema == null || freeFormFirst)
+                ? agent.call(messages, ctx)
+                : agent.call(messages, schema, ctx);
+    }
+
+    /**
+     * A document task that used no tool can only have been answered from model memory. Retry once
+     * with the tool requirement stated explicitly; if the model still will not read the file, fail
+     * the task rather than return invented field values.
+     *
+     * @return the retry reply, or {@code null} when the guard is switched off
+     */
+    private Msg answerGroundedInTools(String taskId, String instruction, Path taskDir, List<String> skills,
+                                      String modelName, String prompt, JsonNode schema,
+                                      boolean freeFormFirst, RuntimeContext ctx,
+                                      Set<String> invokedTools, Duration budget, long startedAt) {
+        if (!props.getRunner().isForceDocumentTool()) {
+            log.warn("task {} answered a document instruction with no tool call (guard disabled)", taskId);
+            return null;
+        }
+        long spentMs = (System.nanoTime() - startedAt) / 1_000_000;
+        Duration left = budget.minusMillis(spentMs);
+        if (left.toSeconds() < 20) {
+            throw new AgentException(ErrorCodes.NO_RESULT,
+                    "document instruction answered without any tool call, and no budget left to retry", false);
+        }
+        log.warn("task {} used no tool for a document instruction; retrying once with a forced tool call", taskId);
+        invokedTools.clear();
+        ReActAgent retry = newAgent(taskDir, skills, modelName, invokedTools);
+        String nudged = prompt + "\n\n强制要求：本任务涉及的文件必须先通过工具读取（extract_document_fields / "
+                + "understand_document，或匹配技能规定的接口调用）。没有工具返回的内容时不得给出任何字段值，"
+                + "缺失字段一律写 null。";
+        Msg second = await(taskId, call(retry, nudged, schema, freeFormFirst, ctx), left);
+        if (second == null) {
+            throw new AgentException(ErrorCodes.NO_RESULT, "agent returned no message", true);
+        }
+        if (ungroundedAnswer(instruction, invokedTools)) {
+            throw new AgentException(ErrorCodes.NO_RESULT,
+                    "instruction references a document but the model never called a tool; refusing to "
+                            + "return values that could only come from model memory", false);
+        }
+        return second;
+    }
+
+    private static boolean ungroundedAnswer(String instruction, Set<String> invokedTools) {
+        return invokedTools.isEmpty() && DOCUMENT_REFERENCE.matcher(instruction).find();
+    }
+
+    private ReActAgent newAgent(Path taskDir, List<String> skills, String modelName,
+                                Set<String> invokedTools) {
         AgentProperties.Runner runner = props.getRunner();
         PermissionMode mode;
         try {
@@ -147,7 +226,8 @@ public class AgentTaskRunner {
                 .model(modelFactory.build(modelName))
                 .toolkit(toolkitFactory.build(taskDir))
                 .permissionContext(PermissionContextState.builder().mode(mode).build())
-                .maxIters(runner.getMaxIters());
+                .maxIters(runner.getMaxIters())
+                .hook(new ToolUsageHook(invokedTools));
 
         // Skills flow through repositories, not SkillBox: skillBox(...) is deprecated in 2.0, and
         // the DynamicSkillMiddleware that skillRepository(...) installs rewrites the

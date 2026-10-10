@@ -58,23 +58,23 @@ public class OcrClient {
     }
 
     /**
-     * 识别一张页图。
+     * 识别一份文件（图片或 PDF，服务端按魔数判类型）。
      *
-     * @param imageBytes JPEG/PNG 等图片字节
+     * @param fileBytes 图片或 PDF 二进制
      * @param filename   multipart 里的文件名（服务端按魔数判类型，名字只为可读性）
      * @return 识别文本（可能是空串=该页没有文字）；失败返回 {@code "Error: ..."}
      */
-    public String ocrImage(byte[] imageBytes, String filename) {
+    public String ocr(byte[] fileBytes, String filename) {
         if (!isEnabled()) {
             return "Error: OCR 通道未启用（agent.ocr.enabled=false 或未配 agent.ocr.base-url）。";
         }
-        if (imageBytes == null || imageBytes.length == 0) {
+        if (fileBytes == null || fileBytes.length == 0) {
             return "Error: 未提供图片字节。";
         }
         AgentProperties.Ocr o = props.getOcr();
         String boundary = "----AgentOcr" + System.nanoTime();
         try {
-            byte[] body = multipartBody(boundary, imageBytes, filename, o);
+            byte[] body = multipartBody(boundary, fileBytes, filename, o);
             HttpRequest req = HttpRequest.newBuilder(URI.create(trimSlash(o.getBaseUrl()) + PATH))
                     .timeout(Duration.ofSeconds(o.getTimeoutSeconds()))
                     .header("Content-Type", "multipart/form-data; boundary=" + boundary)
@@ -135,7 +135,19 @@ public class OcrClient {
         if (text.isMissingNode() || text.isNull()) {
             return null;
         }
-        return text.asText();
+        return cleanMarkdown(text.asText());
+    }
+
+    /**
+     * format=md 的返回里带 {@code <img src="images/bbox_*.jpg" />} 这类占位标签：服务端并不返回
+     * 这些图，留着只会白占 token、还会让抽取模型以为有图。顺手压掉多余空行。
+     */
+    private static String cleanMarkdown(String raw) {
+        String cleaned = raw.replaceAll("(?i)<img[^>]*/?>", "")
+                .replaceAll("(?m)[ \\t]+\\n", "\\n")
+                .replaceAll("\\n{3,}", "\\n\\n")
+                .trim();
+        return cleaned;
     }
 
     private static String trimSlash(String url) {

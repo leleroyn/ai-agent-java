@@ -86,6 +86,9 @@ RUN set -eux; \
         # 并打印 "Missing language pack for 'Adobe-GB1' mapping"。它是 poppler-utils 的 Recommends，
         # 而上面用了 --no-install-recommends，所以必须显式装。
         poppler-data \
+        # CJK 字体：PDF 里的中文常用非嵌入字体（STSong-Light 等），缺字体时 pdftoppm 会把中文渲染成
+        # □，视觉模型只能读方块。装一套文泉驿（约 15MB，比 noto-cjk 小一个量级）给 fontconfig 兜底。
+        fonts-wqy-zenhei \
     ; \
     ln -sf "/usr/share/zoneinfo/${TZ}" /etc/localtime; \
     dpkg-reconfigure -f noninteractive tzdata >/dev/null 2>&1 || true; \

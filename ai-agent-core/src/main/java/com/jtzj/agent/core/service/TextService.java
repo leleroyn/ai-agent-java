@@ -201,13 +201,18 @@ public class TextService {
     // ---- 内部 ----
 
     private ChunkOut extractChunk(String text, int chunkNum, int totalChunks, List<String> fields) {
-        String prompt = "这是同一份文档的第 " + chunkNum + " 段（全文共 " + totalChunks
-                + " 段中这一段）。\n"
-                + "只依据这段文本内容，为下面每个字段找出它的值以及出现的段号（用上面标好的段号）。"
-                + "同一字段可能多段出现，都列出段号；这段文本中找不到该字段则不要输出它（不要编造）。\n"
-                + "只输出一个 JSON 对象，不要解释、不要代码围栏。需要抽取的字段：\n"
-                + String.join("\n", fields) + "\n\n输出格式（严格）：\n"
-                + "{\"hits\":[{\"field\":\"字段名\",\"value\":\"值\",\"pages\":[段号数字]}]}\n\n"
+        String prompt = "这是同一份文档的第 " + chunkNum + " 段（全文共 " + totalChunks + " 段）。\n"
+                + "只为下面每个字段找出它的值和值出现的段号（多个都列）。只输出一个 JSON 对象，不要解释、不要代码围栏。\n"
+                + "字段名常常以别名出现在文档里，必须按语义匹配，不要因为文档里没有同名标签就判为找不到。常见对应："
+                + "签订日期=合同订立时间/签署日期/签约日期/落款日期；"
+                + "甲方=承包人/发包人/出让方/需方；乙方=分包人/供方/出让人/受让人；"
+                + "合同金额=签约合同价款/合同总价/中标价/价款；"
+                + "统一社会信用代码=纳税人识别号/信用代码；致（债务人）=致/债务人。\n"
+                + "value 必须是文档里原样出现的片段：不要改写、不要补全或调整数字分隔符、不要把跨行的内容拼起来。"
+                + "文档里是占位符（如 --）就照抄占位符。\n"
+                + "确实找不到就不要输出该字段，禁止编造。\n"
+                + "字段列表：\n" + String.join("\n", fields) + "\n\n输出格式（严格）：\n"
+                + "{\"hits\":[{\"field\":\"字段名\",\"value\":\"值\",\"pages\":[段号]}]}\n\n"
                 + "--- 文档内容 ---\n" + text;
         String answer = visionClient.askTextOnly(prompt);
         if (answer.startsWith("Error:")) {
@@ -231,46 +236,33 @@ public class TextService {
     private String buildResult(List<String> fields,
                                LinkedHashMap<String, LinkedHashMap<String, TreeSet<Integer>>> acc,
                                TreeSet<Integer> failedChunks, int totalChunks) throws Exception {
-        ObjectNode root = mapper.createObjectNode();
-        boolean complete = failedChunks.isEmpty();
-        root.put("status", complete ? "complete" : "partial");
-        root.put("total_units", totalChunks);
-        ArrayNode results = root.putArray("results");
-        LinkedHashSet<String> emitted = new LinkedHashSet<>();
-        for (String field : fields) {
-            emitted.add(field);
-            LinkedHashMap<String, TreeSet<Integer>> byValue = acc.get(field);
-            if (byValue == null || byValue.isEmpty()) {
-                ObjectNode r = results.addObject();
-                r.put("field", field);
-                r.putNull("value");
-                r.putArray("units");
-                continue;
-            }
-            for (var e : byValue.entrySet()) {
-                ObjectNode r = results.addObject();
-                r.put("field", field);
-                r.put("value", e.getKey());
-                ArrayNode units = r.putArray("units");
-                for (int p : e.getValue()) units.add(p);
-            }
-        }
-        for (var e : acc.entrySet()) {
-            if (emitted.contains(e.getKey())) continue;
-            for (var ve : e.getValue().entrySet()) {
-                ObjectNode r = results.addObject();
-                r.put("field", e.getKey());
-                r.put("value", ve.getKey());
-                ArrayNode units = r.putArray("units");
-                for (int p : ve.getValue()) units.add(p);
-            }
-        }
-        ArrayNode failed = root.putArray("failed_units");
-        for (int p : failedChunks) failed.add(p);
-        return mapper.writeValueAsString(root);
+        return Extraction.merge(mapper, fields, acc, failedChunks, totalChunks);
     }
 
+    /**
+     * 分块。OCR 文本每页前有 {@code --- 第 N 页 ---}，优先按页边界打包：绝不把一页劈开，
+     * 也就不会把一个字段值劈开（按字符开窗正是之前产出 {@code 市建诊 有限公司} 这类残缺值的原因之一）。
+     * 没有页标记才退回字符窗口。
+     */
     private List<String> chunk(String text, int size, int overlap) {
+        List<String> pages = splitByPageMarkers(text);
+        if (pages.size() > 1) {
+            List<String> packed = new ArrayList<>();
+            StringBuilder current = new StringBuilder();
+            for (String page : pages) {
+                for (String piece : oversize(page, size)) {
+                    if (current.length() > 0 && current.length() + piece.length() > size) {
+                        packed.add(current.toString());
+                        current.setLength(0);
+                    }
+                    current.append(piece);
+                }
+            }
+            if (current.length() > 0) {
+                packed.add(current.toString());
+            }
+            return packed;
+        }
         List<String> chunks = new ArrayList<>();
         int len = text.length();
         int step = Math.max(1, size - overlap);
@@ -280,6 +272,44 @@ public class TextService {
             if (end >= len) break;
         }
         return chunks;
+    }
+
+    /** 按页标记切页，标记本身留在每段开头（模型要靠它溯源）。少于两页返回空表。 */
+    private static List<String> splitByPageMarkers(String text) {
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("(?m)^--- 第 \\d+ 页 ---$").matcher(text);
+        List<Integer> at = new ArrayList<>();
+        while (m.find()) {
+            at.add(m.start());
+        }
+        if (at.size() < 2) {
+            return List.of();
+        }
+        List<String> parts = new ArrayList<>();
+        if (at.get(0) > 0) {
+            String head = text.substring(0, at.get(0));
+            if (!head.isBlank()) {
+                parts.add(head);
+            }
+        }
+        for (int i = 0; i < at.size(); i++) {
+            int from = at.get(i);
+            int to = (i + 1 < at.size()) ? at.get(i + 1) : text.length();
+            parts.add(text.substring(from, to));
+        }
+        return parts;
+    }
+
+    /** 单页本身就超限时只切这一页，不向相邻页借内容。 */
+    private static List<String> oversize(String page, int size) {
+        if (page.length() <= size) {
+            return List.of(page);
+        }
+        List<String> out = new ArrayList<>();
+        for (int i = 0; i < page.length(); i += size) {
+            out.add(page.substring(i, Math.min(i + size, page.length())));
+        }
+        return out;
     }
 
     private Path resolveSource(String source, AgentProperties.Pdfs cfg, Path taskDir) throws Exception {
