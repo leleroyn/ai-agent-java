@@ -430,11 +430,9 @@ UPDATE agent_task SET callback_status='pending'
 {
   "code": 0,
   "data": [
-    { "name": "extract_image_fields", "description": "从图片里结构化抽取指定字段……" },
-    { "name": "extract_pdf_fields", "description": "从 PDF 文档整篇抽取指定关键信息并定位页码……" },
+    { "name": "extract_document_fields", "description": "文档结构化字段抽取（图片/PDF/TXT）……" },
     { "name": "get_system_time", "description": "获取服务器当前日期和时间……" },
-    { "name": "understand_image", "description": "对图片做自由理解/问答……" },
-    { "name": "understand_pdf", "description": "对 PDF 做自由理解/问答……" }
+    { "name": "understand_document", "description": "文档自由理解/问答（图片/PDF/TXT）……" }
   ]
 }
 ```
@@ -442,8 +440,8 @@ UPDATE agent_task SET callback_status='pending'
 说明：
 
 - `name` 是模型调用时用的工具名，`description` 是用途说明——两者都取自**真正装配出来的工具 schema**，与运行时完全一致，不是另写的一份清单。
-- 只列自定义工具：`get_system_time`、`understand_image`、`extract_image_fields`、`understand_pdf`、`extract_pdf_fields`。框架内置的 `execute_shell_command`/`view_text_file`/`write_text_file`/`insert_text_file`/`list_directory`/`todo_write` **不在此列**。
-- 列表随 `agent.tools.*` 开关变化：关掉某个开关（如 `AGENT_TOOL_IMAGE_EXTRACT=false`），对应自定义工具就不再出现；四个媒体开关全关时返回空数组。
+- 只列自定义工具：`get_system_time`、`understand_document`、`extract_document_fields`。框架内置的 `execute_shell_command`/`view_text_file`/`write_text_file`/`insert_text_file`/`list_directory`/`todo_write` **不在此列**。
+- 列表随 `agent.tools.*` 开关变化：关掉某个开关（如 `AGENT_TOOL_DOCUMENT_EXTRACT=false`），对应自定义工具就不再出现；两个文档开关全关时返回空数组。
 
 ---
 

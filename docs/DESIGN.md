@@ -66,10 +66,9 @@ ai-agent-java/                         Maven 父工程 (packaging=pom, groupId c
 ├── ai-agent-tools/                ★  【自定义工具】加/改工具只动这里；只依赖 core + agentscope
 │   └── src/main/java/com/jtzj/agent/tools/    （每个工具类 + 同名 Provider，Provider 是 @Component）
 │       ├── SystemTimeTools          + SystemTimeToolProvider          (get_system_time)
-│       ├── ImageUnderstandTools     + ImageUnderstandToolProvider     (understand_image)
-│       ├── ImageExtractTools        + ImageExtractToolProvider        (extract_image_fields)
-│       ├── DocumentUnderstandTools  + DocumentUnderstandToolProvider  (understand_pdf)
-│       └── DocumentExtractTools     + DocumentExtractToolProvider     (extract_pdf_fields)
+│       ├── DocumentUnderstandTools  + DocumentUnderstandToolProvider  (understand_document)
+│       ├── DocumentExtractTools     + DocumentExtractToolProvider     (extract_document_fields)
+│       └── SystemTimeToolProvider                                    (get_system_time)
 │
 ├── ai-agent-app/                    【Spring Boot 主应用】依赖 tools + core；启动时收集所有 provider
 │   ├── pom.xml                      spring-boot-maven-plugin 在此；finalName=ai-agent-java-<ver>
@@ -93,7 +92,7 @@ ai-agent-java/                         Maven 父工程 (packaging=pom, groupId c
 | 模块 | 职责 | 依赖 |
 |---|---|---|
 | `ai-agent-core` | 领域模型、配置、共享服务（视觉/PDF/沙箱）、错误、工具 SPI | Spring context + Jackson 2/3；**不依赖 AgentScope** |
-| `ai-agent-tools` | 5 个自定义工具 + 各自 `AgentToolProvider` | core + `agentscope`（`@Tool/@ToolParam` 只在此出现） |
+| `ai-agent-tools` | 3 个自定义工具 + 各自 `AgentToolProvider` | core + `agentscope`（`@Tool/@ToolParam` 只在此出现） |
 | `ai-agent-app` | REST API、任务服务、存储、编排（模型/工具/结构化/技能/工作区） | tools + core |
 
 ---
@@ -134,7 +133,7 @@ ai-agent-java/                         Maven 父工程 (packaging=pom, groupId c
 | POST | `/task` | 提交任务；`options.sync=false`(默认) 立即返回 `status=accepted`，`sync=true` 阻塞至完成直接返回结果 |
 | GET | `/task/{taskId}` | 查询状态/结果 |
 | DELETE | `/task/{taskId}` | 取消（仅未开始的可取消，否则 2002） |
-| GET | `/tools` | 列出**自定义工具**（当前 5 个，来自 SPI，不含框架内置） |
+| GET | `/tools` | 列出**自定义工具**（当前 3 个，来自 SPI，不含框架内置） |
 | GET | `/skills` | 列出已安装技能名 |
 | GET | `/health` | 运行态：`model`/`maxConcurrent`/`queued`/`active`/`workerId`/`permissionMode`/`maxQueuedTasks` |
 
