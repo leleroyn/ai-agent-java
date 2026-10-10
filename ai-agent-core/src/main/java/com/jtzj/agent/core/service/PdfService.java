@@ -74,8 +74,7 @@ public class PdfService {
     }
 
     /**
-     * 自由问答（{@code understand_pdf}）。处理一批页（≤ {@code min(pages-per-call, vision.max-images)}）；
-     * 超过则返回提示让调用方用 {@code page_range} 分批。返回自然语言，或 {@code "Error:"}/提示。
+     * 自由问答（{@code understand_document}）。支持 PDF、TXT、图片。
      */
     public String understand(String pdfSource, String question, String pageRange, Path taskDir) {
         AgentProperties.Pdfs cfg = props.getPdfs();
@@ -101,7 +100,7 @@ public class PdfService {
             if (pages > cap) {
                 int nextEnd = start + cap - 1;
                 return "本文档共 " + total + " 页，本次请求第 " + start + "-" + end + " 页（" + pages
-                        + " 页）超过单次上限 " + cap + " 页。若要抽取关键信息请改用 extract_pdf_fields"
+                        + " 页）超过单次上限 " + cap + " 页。若要抽取关键信息请改用 extract_document_fields"
                         + "（它会服务端遍历整篇）；若只是问答，请用 page_range 分批，例如先 \""
                         + start + "-" + nextEnd + "\"、再往后，然后自行汇总。";
             }

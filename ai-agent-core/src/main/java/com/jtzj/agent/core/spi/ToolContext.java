@@ -3,6 +3,7 @@ package com.jtzj.agent.core.spi;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.jtzj.agent.core.config.AgentProperties;
 import com.jtzj.agent.core.service.PdfService;
+import com.jtzj.agent.core.service.TextService;
 import com.jtzj.agent.core.service.VisionClient;
 
 import java.nio.file.Path;
@@ -32,6 +33,9 @@ public interface ToolContext {
 
     /** Shared PDF service used by the document tools. */
     PdfService pdf();
+
+    /** Shared TXT service used by the document tools. */
+    TextService text();
 
     /** Any Spring bean, by type — the extension point for tools needing a service not covered above. */
     <T> T bean(Class<T> type);

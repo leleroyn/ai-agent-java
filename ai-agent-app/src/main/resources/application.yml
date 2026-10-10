@@ -64,7 +64,7 @@ agent:
       context-window-size: ${AGENT_PRO_CONTEXT_WINDOW:131072}
       strata-checkpoint: ${AGENT_PRO_STRATA_CHECKPOINT:}
 
-  # 独立的视觉（多模态）模型，仅供 understand_image 工具调用。
+  # 独立的视觉（多模态）模型，供 understand_document / extract_document_fields 工具调用。
   # 图片字节只到这里，绝不进主模型的上下文——主模型保持纯文本。
   # 该端点必须是带 mmproj 的真 VL 模型；不带 mmproj 的会直接返回
   # "500 image input is not supported ... provide the mmproj"。
@@ -90,11 +90,10 @@ agent:
       你是自动化任务代理，无人在线，禁止提问。
       规则：
       - 指令自包含时直接回答，不调工具。
-      - 你不能看图/PDF，绝对禁止 read-file 或 shell 打印图片/PDF内容；只能用专用工具处理。
-      - 图片来源是 http(s) URL 或工作目录下的本地路径。
-      - 图片：要字段值 → extract_image_fields；要开放理解 → understand_image。
-      - PDF：要字段值 → extract_pdf_fields（抽取默认用它）；开放理解 → understand_pdf。
-      - 任务是“找特定信息”时优先用 extract_* 而非 understand_*。
+      - 你不能看图/PDF/TXT，绝对禁止 read-file 或 shell 打印图片/PDF/TXT内容；只能用专用工具处理。
+      - 文档来源是 http(s) URL 或工作目录下的本地路径。
+      - 要字段值 → extract_document_fields；要开放理解 → understand_document。
+      - 任务是"找特定信息"时优先用 extract_document_fields。
       - 每个目标只调一次工具，第一次返回即权威，不得重复调用确认。
       - 涉及日期/时间必须调 get_system_time，禁止凭记忆推断。
       - 信息够了就输出结果并停止。
@@ -130,17 +129,16 @@ agent:
     # Backpressure: refuse new submissions beyond this many still-queued tasks. 0 disables.
     max-queued-tasks: ${AGENT_MAX_QUEUED_TASKS:1000}
 
-  # PDF 工具（understand_pdf 自由问答 / extract_pdf_fields 整篇抽取）：逐页栅格化后交给视觉模型
-  # （复用 agent.vision）；图片字节不进主模型上下文。extract_pdf_fields 服务端遍历整篇保召回，
-  # 语义总结交给主模型。
+  # PDF/TXT 工具配置（understand_document / extract_document_fields）：
+  # PDF 逐页栅格化后交给视觉模型；TXT 分块纯文本调视觉模型。服务端遍历整篇保召回。
   pdf:
     enabled: ${AGENT_PDF_ENABLED:true}
-    # 每批交给视觉模型的页数（understand_pdf 单次上限；extract_pdf_fields 每批页数）。
+    # 每批交给视觉模型的页数（understand_document 单次上限；extract_document_fields 每批页数）。
     # 实际上限 = min(本值, agent.vision.max-images)。
     pages-per-call: ${AGENT_PDF_PAGES_PER_CALL:6}
-    # extract_pdf_fields 遍历整篇时的并发批数。
+    # extract_document_fields 遍历整篇时的并发批数。
     concurrency: ${AGENT_PDF_CONCURRENCY:4}
-    # extract_pdf_fields 服务端最多扫描多少页（兜底）；超过只扫前 N 页并标 incomplete。
+    # extract_document_fields 服务端最多扫描多少页（兜底）；超过只扫前 N 页并标 incomplete。
     max-pages: ${AGENT_PDF_MAX_PAGES:200}
     # 栅格化最长边像素（控 token；0=不缩放）。pdftoppm -scale-to。
     max-image-dimension: ${AGENT_PDF_MAX_DIM:1568}
@@ -149,6 +147,9 @@ agent:
     timeout-seconds: ${AGENT_PDF_TIMEOUT:120}
     # PDF 下载体积上限（字节），防 DoS。
     max-download-bytes: ${AGENT_PDF_MAX_DOWNLOAD_BYTES:209715200}
+    # TXT 分块大小（字符）/ 重叠（防字段截断在块边界）。
+    text-chunk-size: ${AGENT_PDF_TEXT_CHUNK_SIZE:4000}
+    text-chunk-overlap: ${AGENT_PDF_TEXT_CHUNK_OVERLAP:200}
     # SSRF 主机白名单（后缀匹配）；留空=允许任意 http/https（与图片工具一致）。
     # ssrf-allowlist:
     #   - internal.example
@@ -161,13 +162,9 @@ agent:
     todo: ${AGENT_TOOL_TODO:true}
     # 自定义工具：get_system_time（服务器当前时间）。默认全局开启。
     system-time: ${AGENT_TOOL_SYSTEM_TIME:true}
-    # 自定义工具：understand_image（图片自由理解）。
-    image-understand: ${AGENT_TOOL_IMAGE_UNDERSTAND:true}
-    # 自定义工具：extract_image_fields（图片字段结构化抽取）。
-    image-extract: ${AGENT_TOOL_IMAGE_EXTRACT:true}
-    # 自定义工具：understand_pdf（PDF 自由理解/问答）。
+    # 自定义工具：understand_document（图片/PDF/TXT 自由理解）。
     document-understand: ${AGENT_TOOL_DOCUMENT_UNDERSTAND:true}
-    # 自定义工具：extract_pdf_fields（PDF 整篇字段抽取，服务端遍历保召回）。
+    # 自定义工具：extract_document_fields（图片/PDF/TXT 字段抽取）。
     document-extract: ${AGENT_TOOL_DOCUMENT_EXTRACT:true}
 
     # Sandbox root. Each task gets its own private subdirectory <working-dir>/<taskId>,

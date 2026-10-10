@@ -769,6 +769,10 @@ public class AgentProperties {
         private int timeoutSeconds = 120;
         /** PDF 下载体积上限（字节），防 DoS。 */
         private int maxDownloadBytes = 200 * 1024 * 1024;
+        /** TXT 分块大小（字符数），每块独立调视觉模型抽取。 */
+        private int textChunkSize = 4000;
+        /** TXT 分块重叠（字符数），防止字段被截断在块边界。 */
+        private int textChunkOverlap = 200;
         /**
          * SSRF 主机白名单（按后缀匹配，如 {@code internal.example}）；空=允许任意 http/https（与图片工具一致）。
          */
@@ -844,6 +848,22 @@ public class AgentProperties {
 
         public void setSsrfAllowlist(List<String> ssrfAllowlist) {
             this.ssrfAllowlist = ssrfAllowlist == null ? new ArrayList<>() : ssrfAllowlist;
+        }
+
+        public int getTextChunkSize() {
+            return textChunkSize;
+        }
+
+        public void setTextChunkSize(int textChunkSize) {
+            this.textChunkSize = Math.max(500, textChunkSize);
+        }
+
+        public int getTextChunkOverlap() {
+            return textChunkOverlap;
+        }
+
+        public void setTextChunkOverlap(int textChunkOverlap) {
+            this.textChunkOverlap = Math.max(0, textChunkOverlap);
         }
     }
 }

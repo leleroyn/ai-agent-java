@@ -2,6 +2,7 @@ package com.jtzj.agent.runtime;
 
 import com.jtzj.agent.core.config.AgentProperties;
 import com.jtzj.agent.core.service.PdfService;
+import com.jtzj.agent.core.service.TextService;
 import com.jtzj.agent.core.service.VisionClient;
 import com.jtzj.agent.core.spi.AgentToolProvider;
 import com.jtzj.agent.core.spi.ToolContext;
@@ -55,6 +56,7 @@ public class ToolkitFactory {
     private final AgentProperties props;
     private final VisionClient visionClient;
     private final PdfService pdfService;
+    private final TextService textService;
     private final ObjectMapper mapper;
     private final Environment env;
     private final org.springframework.context.ApplicationContext context;
@@ -63,6 +65,7 @@ public class ToolkitFactory {
     public ToolkitFactory(AgentProperties props,
                           VisionClient visionClient,
                           PdfService pdfService,
+                          TextService textService,
                           @Qualifier("agentScopeObjectMapper") ObjectMapper mapper,
                           Environment env,
                           org.springframework.context.ApplicationContext context,
@@ -70,6 +73,7 @@ public class ToolkitFactory {
         this.props = props;
         this.visionClient = visionClient;
         this.pdfService = pdfService;
+        this.textService = textService;
         this.mapper = mapper;
         this.env = env;
         this.context = context;
@@ -196,6 +200,11 @@ public class ToolkitFactory {
             @Override
             public PdfService pdf() {
                 return pdfService;
+            }
+
+            @Override
+            public TextService text() {
+                return textService;
             }
 
             @Override

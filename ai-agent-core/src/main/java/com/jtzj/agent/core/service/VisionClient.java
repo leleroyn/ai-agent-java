@@ -162,6 +162,43 @@ public class VisionClient {
         }
     }
 
+    /**
+     * 纯文本问答（无图片）。用于 TXT 分块抽取等场景。
+     */
+    public String askTextOnly(String prompt) {
+        AgentProperties.Vision v = props.getVision();
+        if (!v.isEnabled()) {
+            return "Error: 视觉功能未启用（agent.vision.enabled=false）。";
+        }
+        try {
+            byte[] body = buildRequest(v, prompt, List.of());
+            Duration timeout = Duration.ofSeconds(v.getTimeoutSeconds());
+            HttpRequest req = HttpRequest.newBuilder(URI.create(trimSlash(v.getBaseUrl()) + "/chat/completions"))
+                    .timeout(timeout)
+                    .header("Content-Type", "application/json")
+                    .header("Authorization", "Bearer " + (v.getApiKey() == null ? "" : v.getApiKey()))
+                    .POST(HttpRequest.BodyPublishers.ofByteArray(body))
+                    .build();
+            long start = System.nanoTime();
+            HttpResponse<byte[]> resp = http.send(req, HttpResponse.BodyHandlers.ofByteArray());
+            long ms = (System.nanoTime() - start) / 1_000_000;
+            String respBody = new String(resp.body(), StandardCharsets.UTF_8);
+            if (resp.statusCode() / 100 != 2) {
+                log.warn("vision(text) HTTP {} in {}ms body={}", resp.statusCode(), ms, snippet(respBody));
+                return "Error: 视觉模型返回 HTTP " + resp.statusCode() + "：" + snippet(respBody);
+            }
+            String text = extractContent(respBody);
+            if (text == null || text.isBlank()) {
+                return "Error: 视觉模型返回了空内容。";
+            }
+            log.info("vision(text) ok in {}ms chars={}", ms, text.length());
+            return text;
+        } catch (Exception e) {
+            log.error("vision(text) call failed", e);
+            return "Error: 调用视觉模型失败：" + e.getClass().getSimpleName() + ": " + e.getMessage();
+        }
+    }
+
     /** 下载单张图并转成 data URL；任何不合规情况通过 {@link ImageData#error} 返回可读错误。 */
     private ImageData downloadAsDataUrl(String url, AgentProperties.Vision v) {
         if (url == null || url.isBlank()) {

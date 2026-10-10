@@ -4,7 +4,7 @@ import com.jtzj.agent.core.spi.AgentToolProvider;
 import com.jtzj.agent.core.spi.ToolContext;
 import org.springframework.stereotype.Component;
 
-/** Contributes {@link DocumentUnderstandTools} (free-form PDF Q&A / page reading). */
+/** Contributes {@link DocumentUnderstandTools} (free-form document Q&A: image/PDF/TXT). */
 @Component
 public class DocumentUnderstandToolProvider implements AgentToolProvider {
 
@@ -15,6 +15,7 @@ public class DocumentUnderstandToolProvider implements AgentToolProvider {
 
     @Override
     public Object createTool(ToolContext context) {
-        return new DocumentUnderstandTools(context.pdf(), context.taskDir());
+        return new DocumentUnderstandTools(
+                context.vision(), context.pdf(), context.text(), context.properties(), context.taskDir());
     }
 }
