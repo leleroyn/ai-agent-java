@@ -64,7 +64,7 @@ public class TextService {
         if (!props.getVision().isEnabled()) {
             return "Error: 视觉功能未启用（agent.vision.enabled=false），无法处理文档。";
         }
-        List<String> fields = parseFields(fieldsRaw);
+        List<String> fields = Extraction.parseFields(fieldsRaw);
         if (fields.isEmpty()) {
             return "Error: fields 为空，请指定要抽取的字段。";
         }
@@ -74,6 +74,11 @@ public class TextService {
                 return "Error: 本地文档路径必须在任务工作目录内且存在：" + txtSource;
             }
             boolean downloaded = isHttpUrl(txtSource);
+            long fileSize = Files.size(file);
+            if (fileSize > cfg.getMaxDownloadBytes()) {
+                if (downloaded) Files.deleteIfExists(file);
+                return "Error: 文件体积 " + fileSize + " 字节超过上限 " + cfg.getMaxDownloadBytes();
+            }
             String content;
             try {
                 content = Files.readString(file, StandardCharsets.UTF_8);
@@ -147,6 +152,11 @@ public class TextService {
                 return "Error: 本地文档路径必须在任务工作目录内且存在：" + txtSource;
             }
             boolean downloaded = isHttpUrl(txtSource);
+            long fileSize = Files.size(file);
+            if (fileSize > cfg.getMaxDownloadBytes()) {
+                if (downloaded) Files.deleteIfExists(file);
+                return "Error: 文件体积 " + fileSize + " 字节超过上限 " + cfg.getMaxDownloadBytes();
+            }
             String content;
             try {
                 content = Files.readString(file, StandardCharsets.UTF_8);
@@ -263,7 +273,7 @@ public class TextService {
     private List<String> chunk(String text, int size, int overlap) {
         List<String> chunks = new ArrayList<>();
         int len = text.length();
-        int step = size - overlap;
+        int step = Math.max(1, size - overlap);
         for (int start = 0; start < len; start += step) {
             int end = Math.min(start + size, len);
             chunks.add(text.substring(start, end));
@@ -323,16 +333,7 @@ public class TextService {
         return t.startsWith("http://") || t.startsWith("https://");
     }
 
-    private static List<String> parseFields(String raw) {
-        LinkedHashSet<String> set = new LinkedHashSet<>();
-        if (raw != null) {
-            for (String part : raw.split("[;；,，、\\n\\r]+")) {
-                String f = part.trim();
-                if (!f.isEmpty()) set.add(f);
-            }
-        }
-        return new ArrayList<>(set);
-    }
+    // parseFields 统一用 Extraction.parseFields()
 
     private static final class ChunkOut {
         final List<Extraction.Hit> hits;

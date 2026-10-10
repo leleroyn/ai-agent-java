@@ -119,4 +119,18 @@ public final class Extraction {
         }
         return n.asText();
     }
+
+    /**
+     * 解析字段列表：按 ; ； , ， 、 换行 分割，去空去重，保持顺序。
+     */
+    public static List<String> parseFields(String raw) {
+        java.util.LinkedHashSet<String> set = new java.util.LinkedHashSet<>();
+        if (raw != null) {
+            for (String part : raw.split("[;；,，、\\n\\r]+")) {
+                String f = part.trim();
+                if (!f.isEmpty()) set.add(f);
+            }
+        }
+        return new ArrayList<>(set);
+    }
 }

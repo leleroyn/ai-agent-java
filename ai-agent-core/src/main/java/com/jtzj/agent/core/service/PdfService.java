@@ -132,7 +132,7 @@ public class PdfService {
         if (!props.getVision().isEnabled()) {
             return "Error: 视觉功能未启用（agent.vision.enabled=false），无法理解 PDF。";
         }
-        List<String> fields = parseFields(fieldsRaw);
+        List<String> fields = Extraction.parseFields(fieldsRaw);
         if (fields.isEmpty()) {
             return "Error: fields 为空，请用 fields 指定要抽取的关键信息（多个用 ; 逗号 、 或换行分隔）。";
         }
@@ -507,18 +507,7 @@ public class PdfService {
         return t.startsWith("http://") || t.startsWith("https://");
     }
 
-    private static List<String> parseFields(String raw) {
-        LinkedHashSet<String> set = new LinkedHashSet<>();
-        if (raw != null) {
-            for (String part : raw.split("[;；,，、\\n\\r]+")) {
-                String f = part.trim();
-                if (!f.isEmpty()) {
-                    set.add(f);
-                }
-            }
-        }
-        return new ArrayList<>(set);
-    }
+    // parseFields 统一用 Extraction.parseFields()
 
     private static void markFailed(TreeSet<Integer> failedPages, int[] range) {
         for (int p = range[0]; p <= range[1]; p++) {

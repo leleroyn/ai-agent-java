@@ -164,6 +164,9 @@ public class VisionClient {
 
     /**
      * 纯文本问答（无图片）。用于 TXT 分块抽取等场景。
+     *
+     * <p>发的 content 是数组形式 {@code [{"type":"text","text":"..."}]}（与带图时统一结构）。
+     * llama.cpp / vLLM / OpenAI 均支持；若后端只接受纯字符串 content，需在此处分支。
      */
     public String askTextOnly(String prompt) {
         AgentProperties.Vision v = props.getVision();

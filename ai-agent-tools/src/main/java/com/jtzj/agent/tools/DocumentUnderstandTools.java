@@ -10,15 +10,14 @@ import io.agentscope.core.tool.ToolParam;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
 
 /**
  * 文档<b>自由理解</b>工具 {@code understand_document}：支持图片、PDF、TXT。
  * 根据文件扩展名自动路由到对应管线（图片→视觉模型、PDF→栅格化→视觉模型、TXT→分块→视觉模型）。
+ *
+ * <p>混合类型时分别处理各类型，结果拼接；不跨类型对比。
  */
 public class DocumentUnderstandTools {
-
-    private static final List<String> IMAGE_EXTS = List.of(".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp");
 
     private final VisionClient visionClient;
     private final PdfService pdfService;
@@ -39,7 +38,8 @@ public class DocumentUnderstandTools {
             name = "understand_document",
             description = "文档自由理解/问答。支持图片（jpg/png/webp等）、PDF、TXT。"
                     + "用于描述、对比、总结、转录或回答关于文档内容的开放性问题。"
-                    + "多个图片来源在一次调用中一起分析，可跨图对比。返回自然语言文本。",
+                    + "多个图片来源在一次调用中一起分析，可跨图对比。"
+                    + "混合类型时分别处理各类型结果拼接，不跨类型对比。返回自然语言文本。",
             readOnly = true,
             concurrencySafe = true)
     public String understand(
@@ -68,21 +68,19 @@ public class DocumentUnderstandTools {
             return "Error: 未提供任何文档来源。";
         }
 
-        // 按类型分组
         List<String> images = new ArrayList<>();
         List<String> pdfs = new ArrayList<>();
         List<String> txts = new ArrayList<>();
         for (String ref : refs) {
-            String ext = getExtension(ref);
-            if (IMAGE_EXTS.contains(ext)) {
+            String ext = MediaInputs.extension(ref);
+            if (MediaInputs.IMAGE_EXTS.contains(ext)) {
                 images.add(ref);
             } else if (".pdf".equals(ext)) {
                 pdfs.add(ref);
             } else if (".txt".equals(ext)) {
                 txts.add(ref);
             } else {
-                // 无扩展名或未知：当图片尝试
-                images.add(ref);
+                images.add(ref); // 无扩展名或未知：当图片尝试
             }
         }
 
@@ -110,17 +108,5 @@ public class DocumentUnderstandTools {
         }
 
         return result.length() == 0 ? "Error: 无法识别文档类型。" : result.toString();
-    }
-
-    private static String getExtension(String ref) {
-        String s = ref;
-        // 去掉 URL query/fragment
-        int q = s.indexOf('?');
-        if (q > 0) s = s.substring(0, q);
-        int h = s.indexOf('#');
-        if (h > 0) s = s.substring(0, h);
-        int dot = s.lastIndexOf('.');
-        if (dot < 0) return "";
-        return s.substring(dot).toLowerCase(Locale.ROOT);
     }
 }

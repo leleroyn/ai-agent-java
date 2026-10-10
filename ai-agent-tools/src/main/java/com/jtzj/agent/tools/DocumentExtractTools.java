@@ -6,6 +6,7 @@ import com.jtzj.agent.core.service.TextService;
 import com.jtzj.agent.core.service.VisionClient;
 import com.jtzj.agent.core.support.Extraction;
 import com.jtzj.agent.core.support.MediaInputs;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -14,9 +15,7 @@ import io.agentscope.core.tool.ToolParam;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -32,12 +31,12 @@ import org.slf4j.LoggerFactory;
  *   <li>PDF：服务端遍历整篇，分批并发，返回 {@code results:[{field, value, pages}]}。</li>
  *   <li>TXT：分块并发，返回 {@code results:[{field, value, pages}]}（pages=段号）。</li>
  * </ul>
+ *
+ * <p>混合类型时分别处理各类型，结果合并到统一 JSON 对象（{@code images}/{@code pdf}/{@code txt} 子节点）。
  */
 public class DocumentExtractTools {
 
     private static final Logger log = LoggerFactory.getLogger(DocumentExtractTools.class);
-    private static final List<String> IMAGE_EXTS = List.of(".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp");
-    private static final int MAX_IMAGE_CONCURRENCY = 8;
 
     private final VisionClient visionClient;
     private final PdfService pdfService;
@@ -83,7 +82,7 @@ public class DocumentExtractTools {
                     required = false)
             String pageRange) {
 
-        List<String> fields = parseFields(fieldsRaw);
+        List<String> fields = Extraction.parseFields(fieldsRaw);
         if (fields.isEmpty()) {
             return "Error: fields 为空，请指定要抽取的字段（多个用 ; 逗号 、 或换行分隔）。";
         }
@@ -92,13 +91,12 @@ public class DocumentExtractTools {
             return "Error: 未提供任何文档来源。";
         }
 
-        // 按类型分组
         List<String> images = new ArrayList<>();
         List<String> pdfs = new ArrayList<>();
         List<String> txts = new ArrayList<>();
         for (String ref : refs) {
-            String ext = getExtension(ref);
-            if (IMAGE_EXTS.contains(ext)) {
+            String ext = MediaInputs.extension(ref);
+            if (MediaInputs.IMAGE_EXTS.contains(ext)) {
                 images.add(ref);
             } else if (".pdf".equals(ext)) {
                 pdfs.add(ref);
@@ -109,34 +107,38 @@ public class DocumentExtractTools {
             }
         }
 
-        // 纯图片走图片管线（返回 records 格式）
+        // 纯图片
         if (!images.isEmpty() && pdfs.isEmpty() && txts.isEmpty()) {
             return extractImages(images, fields);
         }
-
-        // 纯 PDF 走 PDF 管线（返回 results 格式）
+        // 纯 PDF（单个）
         if (images.isEmpty() && pdfs.size() == 1 && txts.isEmpty()) {
             return pdfService.extractFields(pdfs.get(0), fieldsRaw, pageRange, taskDir);
         }
-
-        // 纯 TXT 走 TXT 管线
+        // 纯 TXT（单个）
         if (images.isEmpty() && pdfs.isEmpty() && txts.size() == 1) {
             return textService.extractFields(txts.get(0), fieldsRaw, taskDir);
         }
 
-        // 混合类型：分别处理，合并输出
+        // 混合类型：分别处理，合并为结构化 JSON
         ObjectNode root = mapper.createObjectNode();
         if (!images.isEmpty()) {
-            String imgResult = extractImages(images, fields);
-            root.put("images_result", imgResult);
+            String imgJson = extractImages(images, fields);
+            JsonNode parsed = tryParse(imgJson);
+            if (parsed != null) root.set("images", parsed);
+            else root.put("images", imgJson);
         }
         for (String pdf : pdfs) {
-            String pdfResult = pdfService.extractFields(pdf, fieldsRaw, pageRange, taskDir);
-            root.put("pdf_result", pdfResult);
+            String pdfJson = pdfService.extractFields(pdf, fieldsRaw, pageRange, taskDir);
+            JsonNode parsed = tryParse(pdfJson);
+            if (parsed != null) root.set("pdf", parsed);
+            else root.put("pdf", pdfJson);
         }
         for (String txt : txts) {
-            String txtResult = textService.extractFields(txt, fieldsRaw, taskDir);
-            root.put("txt_result", txtResult);
+            String txtJson = textService.extractFields(txt, fieldsRaw, taskDir);
+            JsonNode parsed = tryParse(txtJson);
+            if (parsed != null) root.set("txt", parsed);
+            else root.put("txt", txtJson);
         }
         try {
             return mapper.writeValueAsString(root);
@@ -157,7 +159,7 @@ public class DocumentExtractTools {
         int n = dataUrls.size();
         log.info("doc extract images={} fields={}", n, fields.size());
 
-        int pool = Math.max(1, Math.min(n, MAX_IMAGE_CONCURRENCY));
+        int pool = Math.max(1, Math.min(n, props.getPdfs().getConcurrency()));
         ExecutorService exec = Executors.newFixedThreadPool(pool);
         List<Future<ImgOut>> futures = new ArrayList<>();
         try {
@@ -225,35 +227,19 @@ public class DocumentExtractTools {
         return ImgOut.ok(vals);
     }
 
-    private String buildImagePrompt(List<String> fields) {
+    private static String buildImagePrompt(List<String> fields) {
         return "只依据这张图片内容，为下面每个字段抽出它的值。图中确实没有的字段，value 用 null，不要编造。"
                 + "只输出一个 JSON 对象，不要解释、不要代码围栏。字段：\n"
                 + String.join("\n", fields) + "\n\n输出格式（严格）：\n"
                 + "{\"hits\":[{\"field\":\"字段名\",\"value\":\"值或null\"}]}";
     }
 
-    // ---- 工具方法 ----
-
-    private static String getExtension(String ref) {
-        String s = ref;
-        int q = s.indexOf('?');
-        if (q > 0) s = s.substring(0, q);
-        int h = s.indexOf('#');
-        if (h > 0) s = s.substring(0, h);
-        int dot = s.lastIndexOf('.');
-        if (dot < 0) return "";
-        return s.substring(dot).toLowerCase(Locale.ROOT);
-    }
-
-    private static List<String> parseFields(String raw) {
-        LinkedHashSet<String> set = new LinkedHashSet<>();
-        if (raw != null) {
-            for (String part : raw.split("[;；,，、\\n\\r]+")) {
-                String f = part.trim();
-                if (!f.isEmpty()) set.add(f);
-            }
+    private JsonNode tryParse(String json) {
+        try {
+            return mapper.readTree(json);
+        } catch (Exception e) {
+            return null;
         }
-        return new ArrayList<>(set);
     }
 
     private static final class ImgOut {

@@ -27,6 +27,24 @@ public final class MediaInputs {
         }
     }
 
+    /** 图片扩展名集合（小写含点）。 */
+    public static final List<String> IMAGE_EXTS = List.of(".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp");
+
+    /**
+     * 从 URL 或文件路径提取小写扩展名（含点）。去掉 query/fragment。
+     * 无扩展名返回空串。
+     */
+    public static String extension(String ref) {
+        String s = ref;
+        int q = s.indexOf('?');
+        if (q >= 0) s = s.substring(0, q);
+        int h = s.indexOf('#');
+        if (h >= 0) s = s.substring(0, h);
+        int dot = s.lastIndexOf('.');
+        if (dot < 0) return "";
+        return s.substring(dot).toLowerCase(java.util.Locale.ROOT);
+    }
+
     /** 按空白切分来源，去空、按出现顺序去重。URL 与本地路径本身不含空白，切分无歧义。 */
     public static List<String> parse(String raw) {
         LinkedHashSet<String> set = new LinkedHashSet<>();
