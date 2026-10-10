@@ -872,9 +872,9 @@ public class AgentProperties {
         }
     }
     /**
-     * OCR 服务（综合服务平台 /api/v3/ocr/preprocess）配置：PDF 里含图片的页的加速通道。
+     * OCR 服务（综合服务平台 /api/v3/ocr/preprocess）配置：需要 OCR 的 PDF 页的加速通道。
      *
-     * <p>{@code PdfService} 用 pdfimages 找出含图片的页（扫描件、插图页），这些页逐页送 OCR 换文本，
+     * <p>{@code PdfService} 把含图片的页（扫描件、插图页）与文字层几乎没有中日韩文字的页（假文字层）逐页送 OCR，
      * 其余页直接取 pdftotext 的文字层；之后的字段抽取与问答只发文本，比逐批喂视觉模型快得多。
      * OCR 未启用或不可用时自动回退视觉通道。
      */

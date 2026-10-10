@@ -50,9 +50,10 @@ import org.springframework.stereotype.Component;
  * <p>与 {@link VisionClient} 同源解耦：页面图像只发到 {@code agent.vision} 端点，主模型只拿文字。
  * 栅格化用 {@code pdftoppm}（poppler-utils），产物写任务沙箱、用完即删；本地来源的源文件绝不删。
  *
- * <p>含图片的页（扫描件）逐批喂视觉模型很慢，所以先探测：{@code pdfimages -list} 找出含图片的页，
- * 这些页走 {@link OcrClient}（逐页 OCR 换文本）、其余页取 {@code pdftotext} 文字层，之后的抽取/问答
- * 只发文本；OCR 未启用或不可用时自动回退视觉通道。
+ * <p>需要 OCR 的页逐批喂视觉模型很慢，所以先探测：{@code pdfimages -list} 找含图片的页，再加一条兜底——
+ * {@code pdftotext} 文字层里中日韩占比过低的页（缺 ToUnicode 的「假文字层」，中文会全丢）。这些页走
+ * {@link OcrClient}（逐页 OCR 换文本），其余页取文字层，之后的抽取/问答只发文本；
+ * OCR 未启用或不可用时自动回退视觉通道。
  */
 @Component
 public class PdfService {
@@ -60,6 +61,8 @@ public class PdfService {
     private static final Logger log = LoggerFactory.getLogger(PdfService.class);
     private static final Pattern PAGES = Pattern.compile("^Pages:\\s*(\\d+)", Pattern.MULTILINE);
     private static final Pattern TRAIL_NUM = Pattern.compile("-(\\d+)\\.[A-Za-z0-9]+$");
+    /** 文字层里中日韩占比低于此值就视为「文字层不可用」，该页改走 OCR（缺 ToUnicode 的 PDF 中文会全丢）。 */
+    private static final double MIN_CJK_RATIO = 0.05;
 
     private final AgentProperties props;
     private final ObjectMapper mapper;
@@ -114,16 +117,11 @@ public class PdfService {
             }
             String q = (question == null || question.isBlank())
                     ? "请逐页转录并说明这一页的标题与主要内容。" : question.trim();
-            // 含图片的页走 OCR 文本通道；OCR 未启用或全部失败时回退视觉模型。
+            // 需要 OCR 的页走 OCR 文本通道；没有页需要 OCR 或 OCR 全失败时回退视觉模型。
             if (ocrClient.isEnabled()) {
-                TreeSet<Integer> imagePages = pagesWithImages(pdf, start, end);
-                if (!imagePages.isEmpty()) {
-                    log.info("pdf understand 走 OCR 通道 src={} imagePages={}/{}",
-                            pdfSource, imagePages.size(), pages);
-                    String viaOcr = understandViaOcr(pdf, start, end, imagePages, total, q, taskDir);
-                    if (viaOcr != null) {
-                        return viaOcr;
-                    }
+                String viaOcr = understandViaOcr(pdf, start, end, total, q, taskDir);
+                if (viaOcr != null) {
+                    return viaOcr;
                 }
             }
             List<String> urls = rasterize(pdf, start, end, 0, taskDir);
@@ -175,21 +173,16 @@ public class PdfService {
             log.info("pdf extract src={} total={} range={}-{} scanEnd={} incomplete={} k={} pool={} fields={}",
                     pdfSource, total, start, end, scanEnd, incomplete, k, pool, fields.size());
 
-            // 含图片的页（扫描件、插图页）走 OCR：逐页识别成文本后按页分块做纯文本抽取，
-            // 比把这些页喂视觉模型快得多；纯文字页直接取 pdftotext 文字层，不花 OCR 成本。
-            // OCR 未启用或全部失败时返回 null，自动回退下面的视觉管线。
+            // 需要 OCR 的页（含图片的页，或文字层几乎没有中日韩文字的页）走 OCR 换文本，比把这些页喂
+            // 视觉模型快得多；其余页直接取 pdftotext 文字层，不花 OCR 成本。
+            // 没有页需要 OCR、或 OCR 全部失败时返回 null，自动回退下面的视觉管线。
             if (ocrClient.isEnabled()) {
-                TreeSet<Integer> imagePages = pagesWithImages(pdf, start, scanEnd);
-                log.info("pdf extract 图片页探测 src={} imagePages={}/{}",
-                        pdfSource, imagePages.size(), scanEnd - start + 1);
-                if (!imagePages.isEmpty()) {
-                    PageTexts pt = collectPageTexts(pdf, start, scanEnd, imagePages, taskDir);
-                    if (pt != null) {
-                        LinkedHashMap<String, LinkedHashMap<String, TreeSet<Integer>>> ocrAcc = new LinkedHashMap<>();
-                        TreeSet<Integer> ocrFailed = new TreeSet<>();
-                        extractFromPageTexts(pt, fields, total, start, scanEnd, ocrAcc, ocrFailed);
-                        return buildExtractResult(fields, ocrAcc, ocrFailed, total, start, scanEnd, incomplete, "ocr");
-                    }
+                PageTexts pt = collectPageTexts(pdf, start, scanEnd, taskDir);
+                if (pt != null) {
+                    LinkedHashMap<String, LinkedHashMap<String, TreeSet<Integer>>> ocrAcc = new LinkedHashMap<>();
+                    TreeSet<Integer> ocrFailed = new TreeSet<>();
+                    extractFromPageTexts(pt, fields, total, start, scanEnd, ocrAcc, ocrFailed);
+                    return buildExtractResult(fields, ocrAcc, ocrFailed, total, start, scanEnd, incomplete, "ocr");
                 }
             }
 
@@ -381,13 +374,32 @@ public class PdfService {
     }
 
     /**
-     * 组装「页码→文本」：含图片的页栅格化后并发送 OCR 服务，纯文字页直接用 pdftotext 的文字层（零成本）。
+     * 组装「页码→文本」：需要 OCR 的页栅格化后并发送 OCR 服务，其余页直接用 pdftotext 的文字层（零成本）。
      *
-     * @return 页文本与失败页；{@code null} 表示 OCR 全部失败（服务不可用），调用方应回退视觉管线
+     * <p>需要 OCR 的页 = 含图片 XObject 的页，<b>或</b>文字层里几乎没有中日韩文字的页。后半条是必须的：
+     * 有些 PDF 有文字层但缺 ToUnicode 映射，{@code pdftotext} 取出来的是「非空但完全不可用」的乱码
+     * （中文全丢），只按「有没有图片 / 有没有文字」判断会把这种页当成可直接用文字层，字段就抽不出来。
+     *
+     * @return 页文本与失败页；{@code null} 表示没有任何页需要 OCR、或 OCR 全部失败——调用方走视觉管线
      */
-    private PageTexts collectPageTexts(Path pdf, int start, int end, TreeSet<Integer> imagePages, Path taskDir) {
+    private PageTexts collectPageTexts(Path pdf, int start, int end, Path taskDir) {
         AgentProperties.Ocr o = props.getOcr();
-        List<Integer> targets = new ArrayList<>(imagePages);
+        TreeMap<Integer, String> texts = pageTexts(pdf, start, end);
+        TreeSet<Integer> imagePages = pagesWithImages(pdf, start, end);
+        TreeSet<Integer> targetSet = new TreeSet<>(imagePages);
+        int unusableTextLayer = 0;
+        for (int p = start; p <= end; p++) {
+            if (!targetSet.contains(p) && cjkRatio(texts.get(p)) < MIN_CJK_RATIO) {
+                targetSet.add(p);
+                unusableTextLayer++;
+            }
+        }
+        if (targetSet.isEmpty()) {
+            return null;
+        }
+        log.info("ocr 选页 pages={}-{} imagePages={} textLayerUnusable={} ocrPages={}",
+                start, end, imagePages.size(), unusableTextLayer, targetSet.size());
+        List<Integer> targets = new ArrayList<>(targetSet);
         LinkedHashMap<Integer, String> byPage = new LinkedHashMap<>();
         TreeSet<Integer> failed = new TreeSet<>();
         ExecutorService exec = Executors.newFixedThreadPool(Math.min(o.getConcurrency(), targets.size()));
@@ -418,7 +430,6 @@ public class PdfService {
             log.warn("OCR 通道 {} 页全部失败，回退视觉管线", targets.size());
             return null;
         }
-        TreeMap<Integer, String> texts = pageTexts(pdf, start, end);
         for (var e : texts.entrySet()) {
             int p = e.getKey();
             if (p >= start && p <= end && !byPage.containsKey(p) && !failed.contains(p)) {
@@ -428,6 +439,37 @@ public class PdfService {
         log.info("ocr 通道完成 pages={} ocrPages={} textPages={} failed={}",
                 end - start + 1, targets.size(), byPage.size() - targets.size() + failed.size(), failed.size());
         return new PageTexts(byPage, failed);
+    }
+
+    /**
+     * 文字层里中日韩字符的占比，分母是非空白字符数；空文本或取不到文字返回 0。
+     * 用来识别「有文字层但文字层不可用」的页（缺 ToUnicode 的 PDF 最常见）。
+     */
+    private static double cjkRatio(String text) {
+        if (text == null || text.isBlank()) {
+            return 0.0;
+        }
+        int total = 0;
+        int cjk = 0;
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (Character.isWhitespace(c)) {
+                continue;
+            }
+            total++;
+            if (isCjk(c)) {
+                cjk++;
+            }
+        }
+        return total == 0 ? 0.0 : (double) cjk / total;
+    }
+
+    /** 中日韩文字：CJK 统一表意文字、扩展 A、兼容表意文字、日文假名；只数表意文字，标点不计。 */
+    private static boolean isCjk(char c) {
+        return (c >= 0x4E00 && c <= 0x9FFF)
+                || (c >= 0x3400 && c <= 0x4DBF)
+                || (c >= 0xF900 && c <= 0xFAFF)
+                || (c >= 0x3040 && c <= 0x30FF);
     }
 
     /** 单页：按 OCR 的 dpi 栅格化 → 送 OCR 服务。返回文本或 {@code "Error: ..."}。 */
@@ -515,10 +557,9 @@ public class PdfService {
         return hits;
     }
 
-    /** 自由问答（OCR 文本通道）。返回 {@code null} 表示 OCR 全失败，调用方回退视觉管线。 */
-    private String understandViaOcr(Path pdf, int start, int end, TreeSet<Integer> imagePages,
-                                    int total, String question, Path taskDir) {
-        PageTexts pt = collectPageTexts(pdf, start, end, imagePages, taskDir);
+    /** 自由问答（OCR 文本通道）。返回 {@code null}=没有页需要 OCR 或 OCR 全失败，调用方回退视觉管线。 */
+    private String understandViaOcr(Path pdf, int start, int end, int total, String question, Path taskDir) {
+        PageTexts pt = collectPageTexts(pdf, start, end, taskDir);
         if (pt == null) {
             return null;
         }

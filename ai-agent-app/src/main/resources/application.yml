@@ -97,6 +97,7 @@ agent:
       - 每个目标只调一次工具，第一次返回即权威，不得重复调用确认。
       - 涉及日期/时间必须调 get_system_time，禁止凭记忆推断。
       - 信息够了就输出结果并停止。
+      - 指令或技能要求 JSON/结构化输出时，最终答案只输出 JSON 本身：不加解释、不加前后缀、不用 Markdown 代码围栏。
       技能：
       - 任务文本已包含技能内容时直接遵循，不再调 load_skill_through_path。
       - <available_skills> 中有匹配项时必须先 load_skill_through_path，然后严格遵循其输出要求。
@@ -129,7 +130,7 @@ agent:
     # Backpressure: refuse new submissions beyond this many still-queued tasks. 0 disables.
     max-queued-tasks: ${AGENT_MAX_QUEUED_TASKS:1000}
 
-  # PDF：含图片的页走 OCR 文本通道（见 agent.ocr），其余页取文字层；OCR 不可用时回退逐页栅格化喂视觉模型。
+  # PDF：需要 OCR 的页（含图片的页，或文字层几乎没有中日韩文字的页）走 OCR 文本通道（见 agent.ocr），其余页取文字层；OCR 不可用时回退视觉模型。
   # TXT：分块纯文本调模型。服务端遍历整篇保召回。
   pdfs:
     enabled: ${AGENT_PDF_ENABLED:true}
@@ -154,7 +155,7 @@ agent:
     # ssrf-allowlist:
     #   - internal.example
 
-  # OCR 服务（综合服务平台 /api/v3/ocr/preprocess）：PDF 里含图片的页（扫描件、插图页）逐页 OCR 换文本，
+  # OCR 服务（综合服务平台 /api/v3/ocr/preprocess）：含图片的页（扫描件、插图页）与文字层几乎没有中日韩文字
   # 之后的字段抽取/问答只发文本，比把这些页喂视觉模型快得多。base-url 留空=关掉该通道，PDF 一律走视觉。
   # 注意：一页一请求（服务端按页拼接会丢空白页、页码对不上），并发数由 concurrency 控制。
   ocr:

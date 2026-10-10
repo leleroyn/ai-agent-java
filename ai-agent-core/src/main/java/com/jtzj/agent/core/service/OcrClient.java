@@ -19,8 +19,9 @@ import org.springframework.stereotype.Component;
  * 独立 OCR 服务（综合服务平台 {@code POST /api/v3/ocr/preprocess}）客户端。
  *
  * <p>存在的意义是<b>省时间</b>：扫描版 PDF 走视觉模型（VL）逐批看图很慢，OCR 服务专做文字识别、
- * 单页更快更稳。{@link PdfService} 用 {@code pdfimages -list} 找出含图片的页（扫描件每页基本就是一整张
- * 位图），这些页栅格化后送这里拿文本、其余页直接取文字层，之后的抽取/问答退化成纯文本调用。
+ * 单页更快更稳。{@link PdfService} 挑出需要 OCR 的页——含图片的页（扫描件每页基本就是一整张位图），以及
+ * 文字层里几乎没有中日韩文字的页（缺 ToUnicode 的假文字层）——栅格化后送这里拿文本，其余页直接取文字层，
+ * 之后的抽取/问答退化成纯文本调用。
  *
  * <p>接口是 multipart/form-data：{@code file}（图片或 PDF 二进制）+ 可选 {@code app_id}
  * {@code resize} {@code use_cls} {@code format}；响应 {@code {"ocr_text": "..."}}。
