@@ -129,9 +129,9 @@ agent:
     # Backpressure: refuse new submissions beyond this many still-queued tasks. 0 disables.
     max-queued-tasks: ${AGENT_MAX_QUEUED_TASKS:1000}
 
-  # PDF/TXT 工具配置（understand_document / extract_document_fields）：
-  # PDF 逐页栅格化后交给视觉模型；TXT 分块纯文本调视觉模型。服务端遍历整篇保召回。
-  pdf:
+  # PDF：含图片的页走 OCR 文本通道（见 agent.ocr），其余页取文字层；OCR 不可用时回退逐页栅格化喂视觉模型。
+  # TXT：分块纯文本调模型。服务端遍历整篇保召回。
+  pdfs:
     enabled: ${AGENT_PDF_ENABLED:true}
     # 每批交给视觉模型的页数（understand_document 单次上限；extract_document_fields 每批页数）。
     # 实际上限 = min(本值, agent.vision.max-images)。
@@ -153,6 +153,27 @@ agent:
     # SSRF 主机白名单（后缀匹配）；留空=允许任意 http/https（与图片工具一致）。
     # ssrf-allowlist:
     #   - internal.example
+
+  # OCR 服务（综合服务平台 /api/v3/ocr/preprocess）：PDF 里含图片的页（扫描件、插图页）逐页 OCR 换文本，
+  # 之后的字段抽取/问答只发文本，比把这些页喂视觉模型快得多。base-url 留空=关掉该通道，PDF 一律走视觉。
+  # 注意：一页一请求（服务端按页拼接会丢空白页、页码对不上），并发数由 concurrency 控制。
+  ocr:
+    enabled: ${AGENT_OCR_ENABLED:true}
+    base-url: ${AGENT_OCR_BASE_URL:http://127.0.0.1:8000}
+    # OCR 并发请求数。
+    concurrency: ${AGENT_OCR_CONCURRENCY:4}
+    # 单次 OCR 请求超时（秒）。
+    timeout-seconds: ${AGENT_OCR_TIMEOUT:120}
+    # OCR 栅格化 dpi / 最长边像素上限（0=不缩放，保识别分辨率）/ JPEG 质量。
+    rasterize-dpi: ${AGENT_OCR_DPI:300}
+    max-image-dimension: ${AGENT_OCR_MAX_DIM:0}
+    jpeg-quality: ${AGENT_OCR_JPEG_QUALITY:90}
+    # 表单参数：resize=服务端缩放（快）；use_cls=方向检测（慢）；format=txt(OpenOCR 快)/md(vLLM 慢)。
+    resize: ${AGENT_OCR_RESIZE:true}
+    use-cls: ${AGENT_OCR_USE_CLS:false}
+    format: ${AGENT_OCR_FORMAT:txt}
+    # 渠道标识，便于 OCR 服务端统计；留空=不下发。
+    app-id: ${AGENT_OCR_APP_ID:ai-agent-java}
 
   tools:
     # Decision: expose all built-in tools. Requires permission-mode BYPASS.

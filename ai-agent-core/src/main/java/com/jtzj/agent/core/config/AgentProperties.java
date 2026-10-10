@@ -20,6 +20,7 @@ public class AgentProperties {
     private String defaultModel = "flash";
     private final Vision vision = new Vision();
     private final Pdfs pdfs = new Pdfs();
+    private final Ocr ocr = new Ocr();
     private final Runner runner = new Runner();
     private final Execution execution = new Execution();
     private final Tools tools = new Tools();
@@ -58,6 +59,10 @@ public class AgentProperties {
 
     public Pdfs getPdfs() {
         return pdfs;
+    }
+
+    public Ocr getOcr() {
+        return ocr;
     }
 
     public Runner getRunner() {
@@ -493,11 +498,11 @@ public class AgentProperties {
          */
         private boolean imageExtract = true;
         /**
-         * 自定义工具：PDF 自由理解（{@code understand_pdf}）。默认开启。读某几页/小文档做自由问答。
+         * 自定义工具：PDF 自由理解（{@code understand_document}）。默认开启。读某几页/小文档做自由问答。
          */
         private boolean documentUnderstand = true;
         /**
-         * 自定义工具：PDF 字段抽取（{@code extract_pdf_fields}）。默认开启。服务端遍历整篇、
+         * 自定义工具：PDF 字段抽取（{@code extract_document_fields}）。默认开启。服务端遍历整篇、
          * 分批并发结构化抽取、确定性归并并回页码，召回不依赖主模型分页。
          */
         private boolean documentExtract = true;
@@ -741,23 +746,23 @@ public class AgentProperties {
     }
 
     /**
-     * PDF 工具配置，服务两个工具：{@code understand_pdf}（自由问答，一批页）与
-     * {@code extract_pdf_fields}（服务端遍历整篇、分批并发结构化抽取、确定性归并）。
+     * PDF 工具配置，服务两个工具：{@code understand_document}（自由问答，一批页）与
+     * {@code extract_document_fields}（服务端遍历整篇、分批并发结构化抽取、确定性归并）。
      *
      * <p>两者都基于 {@code pdftoppm} 逐页栅格化后交给 {@link Vision}；图片字节不进主模型上下文。
-     * {@code extract_pdf_fields} 靠服务端遍历保证召回，语义总结交给主模型。
+     * {@code extract_document_fields} 靠服务端遍历保证召回，语义总结交给主模型。
      */
     public static class Pdfs {
         private boolean enabled = true;
         /**
-         * 每批交给视觉模型的页数（{@code understand_pdf} 的单次上限；{@code extract_pdf_fields}
+         * 每批交给视觉模型的页数（{@code understand_document} 的单次上限；{@code extract_document_fields}
          * 每批喂多少页）。实际上限 = {@code min(本值, agent.vision.max-images)}。
          */
         private int pagesPerCall = 6;
-        /** {@code extract_pdf_fields} 遍历整篇时的并发批数。 */
+        /** {@code extract_document_fields} 遍历整篇时的并发批数。 */
         private int concurrency = 4;
         /**
-         * {@code extract_pdf_fields} 服务端最多扫描多少页（召回与成本的兜底）。超过则只扫前 N 页
+         * {@code extract_document_fields} 服务端最多扫描多少页（召回与成本的兜底）。超过则只扫前 N 页
          * 并在结果里标 {@code incomplete=true}，由主模型决定是否用 page_range 续扫。
          */
         private int maxPages = 200;
@@ -864,6 +869,124 @@ public class AgentProperties {
 
         public void setTextChunkOverlap(int textChunkOverlap) {
             this.textChunkOverlap = Math.max(0, textChunkOverlap);
+        }
+    }
+    /**
+     * OCR 服务（综合服务平台 /api/v3/ocr/preprocess）配置：PDF 里含图片的页的加速通道。
+     *
+     * <p>{@code PdfService} 用 pdfimages 找出含图片的页（扫描件、插图页），这些页逐页送 OCR 换文本，
+     * 其余页直接取 pdftotext 的文字层；之后的字段抽取与问答只发文本，比逐批喂视觉模型快得多。
+     * OCR 未启用或不可用时自动回退视觉通道。
+     */
+    public static class Ocr {
+        private boolean enabled = true;
+        /** OCR 服务基址（不带路径）；留空=不启用 OCR 通道，PDF 一律走视觉模型。 */
+        private String baseUrl = "http://127.0.0.1:8000";
+        /** OCR 并发请求数（一页一请求，页码才准）。 */
+        private int concurrency = 4;
+        /** 单次 OCR 请求超时（秒）。 */
+        private int timeoutSeconds = 120;
+        /** OCR 栅格化 dpi（0=用 pdftoppm 默认）。OCR 需要比视觉通道更高的分辨率。 */
+        private int rasterizeDpi = 300;
+        /** OCR 栅格化最长边像素上限（控上传体积）；0=不缩放（OCR 要保分辨率）。pdftoppm -scale-to。 */
+        private int maxImageDimension = 0;
+        /** OCR 栅格化 JPEG 质量。 */
+        private int jpegQuality = 90;
+        /** 表单字段 resize：服务端是否缩放图像（true 更快）。 */
+        private boolean resize = true;
+        /** 表单字段 use_cls：服务端是否跑方向检测模型（true 更慢）。 */
+        private boolean useCls = false;
+        /** 表单字段 format：txt=OpenOCR（快）；md=走 vLLM（慢）。 */
+        private String format = "txt";
+        /** 表单字段 app_id：渠道标识，便于服务端统计；留空不下发。 */
+        private String appId = "ai-agent-java";
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public String getBaseUrl() {
+            return baseUrl;
+        }
+
+        public void setBaseUrl(String baseUrl) {
+            this.baseUrl = baseUrl;
+        }
+
+        public int getConcurrency() {
+            return concurrency;
+        }
+
+        public void setConcurrency(int concurrency) {
+            this.concurrency = Math.max(1, concurrency);
+        }
+
+        public int getTimeoutSeconds() {
+            return timeoutSeconds;
+        }
+
+        public void setTimeoutSeconds(int timeoutSeconds) {
+            this.timeoutSeconds = Math.max(5, timeoutSeconds);
+        }
+
+        public int getRasterizeDpi() {
+            return rasterizeDpi;
+        }
+
+        public void setRasterizeDpi(int rasterizeDpi) {
+            this.rasterizeDpi = Math.max(0, rasterizeDpi);
+        }
+
+        public int getMaxImageDimension() {
+            return maxImageDimension;
+        }
+
+        public void setMaxImageDimension(int maxImageDimension) {
+            this.maxImageDimension = Math.max(0, maxImageDimension);
+        }
+
+        public int getJpegQuality() {
+            return jpegQuality;
+        }
+
+        public void setJpegQuality(int jpegQuality) {
+            this.jpegQuality = Math.min(100, Math.max(1, jpegQuality));
+        }
+
+        public boolean isResize() {
+            return resize;
+        }
+
+        public void setResize(boolean resize) {
+            this.resize = resize;
+        }
+
+        public boolean isUseCls() {
+            return useCls;
+        }
+
+        public void setUseCls(boolean useCls) {
+            this.useCls = useCls;
+        }
+
+        public String getFormat() {
+            return format;
+        }
+
+        public void setFormat(String format) {
+            this.format = format;
+        }
+
+        public String getAppId() {
+            return appId;
+        }
+
+        public void setAppId(String appId) {
+            this.appId = appId;
         }
     }
 }

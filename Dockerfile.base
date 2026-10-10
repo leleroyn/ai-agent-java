@@ -80,7 +80,7 @@ RUN set -eux; \
         python3-numpy python3-pandas python3-requests python3-yaml \
         python3-dateutil python3-tabulate python3-openpyxl \
         python3-lxml python3-bs4 \
-        # PDF 处理：pdftoppm/pdfinfo，供 understand_pdf / extract_pdf_fields 逐页栅格化扫描版 PDF
+        # PDF 处理：pdftoppm/pdfinfo/pdftotext/pdfimages，供文档工具栅格化页图、取文字层、探测含图片的页
         poppler-utils \
     ; \
     ln -sf "/usr/share/zoneinfo/${TZ}" /etc/localtime; \

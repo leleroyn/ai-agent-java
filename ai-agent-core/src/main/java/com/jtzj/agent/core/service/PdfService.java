@@ -22,6 +22,7 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -38,9 +39,9 @@ import org.springframework.stereotype.Component;
  * PDF 服务端能力，支撑两个职责单一的工具：
  *
  * <ul>
- *   <li>{@link #understand} —— {@code understand_pdf}：把一批页栅格化后连同自由问题交给视觉模型，
+ *   <li>{@link #understand} —— {@code understand_document}：把一批页栅格化后连同自由问题交给视觉模型，
  *       返回自然语言（带绝对页码）。用于对某几页/小文档做自由问答、总结。</li>
- *   <li>{@link #extractFields} —— {@code extract_pdf_fields}：服务端<b>遍历整篇</b>，分批并发地按
+ *   <li>{@link #extractFields} —— {@code extract_document_fields}：服务端<b>遍历整篇</b>，分批并发地按
  *       {@code fields} 结构化抽取，再<b>确定性归并</b>（同字段同值并页码、去重），返回
  *       {@code results:[{field,value,pages}]} + {@code pages_scanned} + {@code incomplete}。
  *       召回由服务端遍历兜底、不依赖主模型分页；语义总结/取舍交给主模型。</li>
@@ -48,6 +49,10 @@ import org.springframework.stereotype.Component;
  *
  * <p>与 {@link VisionClient} 同源解耦：页面图像只发到 {@code agent.vision} 端点，主模型只拿文字。
  * 栅格化用 {@code pdftoppm}（poppler-utils），产物写任务沙箱、用完即删；本地来源的源文件绝不删。
+ *
+ * <p>含图片的页（扫描件）逐批喂视觉模型很慢，所以先探测：{@code pdfimages -list} 找出含图片的页，
+ * 这些页走 {@link OcrClient}（逐页 OCR 换文本）、其余页取 {@code pdftotext} 文字层，之后的抽取/问答
+ * 只发文本；OCR 未启用或不可用时自动回退视觉通道。
  */
 @Component
 public class PdfService {
@@ -59,14 +64,17 @@ public class PdfService {
     private final AgentProperties props;
     private final ObjectMapper mapper;
     private final VisionClient visionClient;
+    private final OcrClient ocrClient;
     private final HttpClient http;
 
     public PdfService(AgentProperties props,
                       @Qualifier("agentScopeObjectMapper") ObjectMapper mapper,
-                      VisionClient visionClient) {
+                      VisionClient visionClient,
+                      OcrClient ocrClient) {
         this.props = props;
         this.mapper = mapper;
         this.visionClient = visionClient;
+        this.ocrClient = ocrClient;
         this.http = HttpClient.newBuilder()
                 .connectTimeout(java.time.Duration.ofSeconds(20))
                 .followRedirects(HttpClient.Redirect.NORMAL)
@@ -104,12 +112,24 @@ public class PdfService {
                         + "（它会服务端遍历整篇）；若只是问答，请用 page_range 分批，例如先 \""
                         + start + "-" + nextEnd + "\"、再往后，然后自行汇总。";
             }
+            String q = (question == null || question.isBlank())
+                    ? "请逐页转录并说明这一页的标题与主要内容。" : question.trim();
+            // 含图片的页走 OCR 文本通道；OCR 未启用或全部失败时回退视觉模型。
+            if (ocrClient.isEnabled()) {
+                TreeSet<Integer> imagePages = pagesWithImages(pdf, start, end);
+                if (!imagePages.isEmpty()) {
+                    log.info("pdf understand 走 OCR 通道 src={} imagePages={}/{}",
+                            pdfSource, imagePages.size(), pages);
+                    String viaOcr = understandViaOcr(pdf, start, end, imagePages, total, q, taskDir);
+                    if (viaOcr != null) {
+                        return viaOcr;
+                    }
+                }
+            }
             List<String> urls = rasterize(pdf, start, end, 0, taskDir);
             if (urls.isEmpty()) {
                 return "Error: 栅格化第 " + start + "-" + end + " 页失败（可能不是有效 PDF）。";
             }
-            String q = (question == null || question.isBlank())
-                    ? "请逐页转录并说明这一页的标题与主要内容。" : question.trim();
             return visionClient.extractFromDataUrls(urls, buildQaPrompt(start, end, total, q));
         } catch (Exception e) {
             log.error("pdf understand failed src={}", pdfSource, e);
@@ -120,7 +140,7 @@ public class PdfService {
     }
 
     /**
-     * 结构化抽取（{@code extract_pdf_fields}）：服务端遍历整篇，分批并发抽取 {@code fields}，
+     * 结构化抽取（{@code extract_document_fields}）：服务端遍历整篇，分批并发抽取 {@code fields}，
      * 确定性归并后返回紧凑 JSON。召回优先——每个 requested 字段都会出现在 results 里
      * （抽不到 {@code value=null}）。不做语义总结。
      *
@@ -154,6 +174,24 @@ public class PdfService {
             int pool = cfg.getConcurrency();
             log.info("pdf extract src={} total={} range={}-{} scanEnd={} incomplete={} k={} pool={} fields={}",
                     pdfSource, total, start, end, scanEnd, incomplete, k, pool, fields.size());
+
+            // 含图片的页（扫描件、插图页）走 OCR：逐页识别成文本后按页分块做纯文本抽取，
+            // 比把这些页喂视觉模型快得多；纯文字页直接取 pdftotext 文字层，不花 OCR 成本。
+            // OCR 未启用或全部失败时返回 null，自动回退下面的视觉管线。
+            if (ocrClient.isEnabled()) {
+                TreeSet<Integer> imagePages = pagesWithImages(pdf, start, scanEnd);
+                log.info("pdf extract 图片页探测 src={} imagePages={}/{}",
+                        pdfSource, imagePages.size(), scanEnd - start + 1);
+                if (!imagePages.isEmpty()) {
+                    PageTexts pt = collectPageTexts(pdf, start, scanEnd, imagePages, taskDir);
+                    if (pt != null) {
+                        LinkedHashMap<String, LinkedHashMap<String, TreeSet<Integer>>> ocrAcc = new LinkedHashMap<>();
+                        TreeSet<Integer> ocrFailed = new TreeSet<>();
+                        extractFromPageTexts(pt, fields, total, start, scanEnd, ocrAcc, ocrFailed);
+                        return buildExtractResult(fields, ocrAcc, ocrFailed, total, start, scanEnd, incomplete, "ocr");
+                    }
+                }
+            }
 
             LinkedHashMap<String, LinkedHashMap<String, TreeSet<Integer>>> acc = new LinkedHashMap<>();
             TreeSet<Integer> failedPages = new TreeSet<>();
@@ -197,7 +235,7 @@ public class PdfService {
             } finally {
                 exec.shutdownNow();
             }
-            return buildExtractResult(fields, acc, failedPages, total, start, scanEnd, incomplete);
+            return buildExtractResult(fields, acc, failedPages, total, start, scanEnd, incomplete, "vision");
         } catch (Exception e) {
             log.error("pdf extract failed src={}", pdfSource, e);
             return "Error: 处理 PDF 失败：" + e.getClass().getSimpleName() + ": " + e.getMessage();
@@ -244,7 +282,7 @@ public class PdfService {
                 + "{\"hits\":[{\"field\":\"字段名\",\"value\":\"值\",\"pages\":[页码数字]}]}";
     }
 
-    /** 自由问答提示（understand_pdf）。 */
+    /** 自由问答提示（understand_document）。 */
     private String buildQaPrompt(int a, int b, int total, String question) {
         return "这是同一份文档的第 " + a + " 到第 " + b + " 页（全文共 " + total + " 页中这一段）。"
                 + "按顺序第 1 张图=第 " + a + " 页，第 2 张图=第 " + (a + 1) + " 页，依此类推。\n"
@@ -252,12 +290,324 @@ public class PdfService {
                 + question;
     }
 
+    // ---- 含图片页探测 / OCR 文本通道（PDF 提速） ----
+
+    /**
+     * 每页文字层文本（页码→文本）：用 {@code pdftotext} 一次取整段，按换页符切页。
+     * 取不到或页数偏多就返回空 map；末尾缺的页按空白页处理（无文本，但不算失败页）。
+     */
+    private TreeMap<Integer, String> pageTexts(Path pdf, int start, int end) {
+        TreeMap<Integer, String> out = new TreeMap<>();
+        try {
+            Process proc = new ProcessBuilder("pdftotext",
+                    "-f", String.valueOf(start), "-l", String.valueOf(end),
+                    "-enc", "UTF-8", pdf.toString(), "-")
+                    .redirectError(ProcessBuilder.Redirect.DISCARD)
+                    .start();
+            String raw;
+            try (InputStream is = proc.getInputStream()) {
+                raw = new String(is.readAllBytes(), StandardCharsets.UTF_8);
+            }
+            if (!proc.waitFor(60, TimeUnit.SECONDS)) {
+                proc.destroy();
+                log.warn("pdftotext 超时 pages={}-{}", start, end);
+                return out;
+            }
+            if (proc.exitValue() != 0) {
+                log.warn("pdftotext 退出码 {} pages={}-{}", proc.exitValue(), start, end);
+                return out;
+            }
+            String[] parts = raw.split("\f", -1);
+            int n = parts.length;
+            while (n > 0 && parts[n - 1].isEmpty()) {
+                n--;
+            }
+            int want = end - start + 1;
+            if (n > want) {
+                log.warn("pdftotext 页数偏多 got={} want={}，该段文字层不可用", n, want);
+                return out;
+            }
+            // 末尾空白页在输出里没有内容：少几页按空白页处理，前面各页页码不受影响
+            for (int i = 0; i < n; i++) {
+                out.put(start + i, parts[i]);
+            }
+        } catch (Exception e) {
+            log.warn("pdftotext 失败 pages={}-{}: {}", start, end, e.toString());
+        }
+        return out;
+    }
+
+    /**
+     * 范围内「含图片」的页码：{@code pdfimages -list} 列出每页的图像 XObject，出现过的页即含图片
+     * （扫描件每页基本就是一整张位图）。列不出来返回空集，调用方走视觉管线。
+     */
+    private TreeSet<Integer> pagesWithImages(Path pdf, int start, int end) {
+        TreeSet<Integer> pages = new TreeSet<>();
+        try {
+            Process proc = new ProcessBuilder("pdfimages", "-list", pdf.toString())
+                    .redirectError(ProcessBuilder.Redirect.DISCARD)
+                    .start();
+            String raw;
+            try (InputStream is = proc.getInputStream()) {
+                raw = new String(is.readAllBytes(), StandardCharsets.UTF_8);
+            }
+            if (!proc.waitFor(60, TimeUnit.SECONDS)) {
+                proc.destroy();
+                log.warn("pdfimages 超时 pages={}-{}", start, end);
+                return pages;
+            }
+            if (proc.exitValue() != 0) {
+                log.warn("pdfimages 退出码 {} pages={}-{}", proc.exitValue(), start, end);
+                return pages;
+            }
+            for (String line : raw.split("\r?\n")) {
+                String s = line.trim();
+                if (s.isEmpty() || !Character.isDigit(s.charAt(0))) {
+                    continue; // 表头与 ----- 分隔行
+                }
+                try {
+                    int p = Integer.parseInt(s.split("\\s+")[0]);
+                    if (p >= start && p <= end) {
+                        pages.add(p);
+                    }
+                } catch (NumberFormatException ignored) {
+                    // 非数据行
+                }
+            }
+        } catch (Exception e) {
+            log.warn("pdfimages 失败 pages={}-{}: {}", start, end, e.toString());
+        }
+        return pages;
+    }
+
+    /**
+     * 组装「页码→文本」：含图片的页栅格化后并发送 OCR 服务，纯文字页直接用 pdftotext 的文字层（零成本）。
+     *
+     * @return 页文本与失败页；{@code null} 表示 OCR 全部失败（服务不可用），调用方应回退视觉管线
+     */
+    private PageTexts collectPageTexts(Path pdf, int start, int end, TreeSet<Integer> imagePages, Path taskDir) {
+        AgentProperties.Ocr o = props.getOcr();
+        List<Integer> targets = new ArrayList<>(imagePages);
+        LinkedHashMap<Integer, String> byPage = new LinkedHashMap<>();
+        TreeSet<Integer> failed = new TreeSet<>();
+        ExecutorService exec = Executors.newFixedThreadPool(Math.min(o.getConcurrency(), targets.size()));
+        try {
+            List<Future<String>> futures = new ArrayList<>(targets.size());
+            for (int p : targets) {
+                futures.add(exec.submit(() -> ocrOnePage(pdf, p, taskDir)));
+            }
+            for (int i = 0; i < futures.size(); i++) {
+                int p = targets.get(i);
+                String text;
+                try {
+                    text = futures.get(i).get();
+                } catch (Exception e) {
+                    text = "Error: " + e;
+                }
+                if (text.startsWith("Error:")) {
+                    log.warn("ocr page {} failed: {}", p, snippet(text));
+                    failed.add(p);
+                } else {
+                    byPage.put(p, text);
+                }
+            }
+        } finally {
+            exec.shutdownNow();
+        }
+        if (failed.size() == targets.size()) {
+            log.warn("OCR 通道 {} 页全部失败，回退视觉管线", targets.size());
+            return null;
+        }
+        TreeMap<Integer, String> texts = pageTexts(pdf, start, end);
+        for (var e : texts.entrySet()) {
+            int p = e.getKey();
+            if (p >= start && p <= end && !byPage.containsKey(p) && !failed.contains(p)) {
+                byPage.put(p, e.getValue());
+            }
+        }
+        log.info("ocr 通道完成 pages={} ocrPages={} textPages={} failed={}",
+                end - start + 1, targets.size(), byPage.size() - targets.size() + failed.size(), failed.size());
+        return new PageTexts(byPage, failed);
+    }
+
+    /** 单页：按 OCR 的 dpi 栅格化 → 送 OCR 服务。返回文本或 {@code "Error: ..."}。 */
+    private String ocrOnePage(Path pdf, int page, Path taskDir) {
+        AgentProperties.Ocr o = props.getOcr();
+        List<byte[]> images;
+        try {
+            images = rasterizeBytes(pdf, page, page, "pgocr" + page, taskDir,
+                    o.getRasterizeDpi(), o.getMaxImageDimension(), o.getJpegQuality());
+        } catch (Exception e) {
+            return "Error: 栅格化第 " + page + " 页失败：" + e.getMessage();
+        }
+        if (images.isEmpty()) {
+            return "Error: 第 " + page + " 页栅格化无产物";
+        }
+        return ocrClient.ocrImage(images.get(0), "page-" + page + ".jpg");
+    }
+
+    /** OCR/文字层文本的字段抽取：按页分块并发调文本模型，命中按页码归并进 {@code acc}。 */
+    private void extractFromPageTexts(PageTexts pt, List<String> fields, int total, int start, int end,
+                                      LinkedHashMap<String, LinkedHashMap<String, TreeSet<Integer>>> acc,
+                                      TreeSet<Integer> failedPages) {
+        List<List<TextPiece>> chunks = chunkPieces(pt.byPage, props.getPdfs().getTextChunkSize());
+        failedPages.addAll(pt.failedPages);
+        if (chunks.isEmpty()) {
+            return;
+        }
+        int pool = Math.min(props.getPdfs().getConcurrency(), chunks.size());
+        ExecutorService exec = Executors.newFixedThreadPool(pool);
+        try {
+            List<Future<List<Extraction.Hit>>> futures = new ArrayList<>(chunks.size());
+            for (List<TextPiece> chunk : chunks) {
+                futures.add(exec.submit(() -> extractTextChunk(chunk, fields, total)));
+            }
+            for (int i = 0; i < futures.size(); i++) {
+                List<TextPiece> chunk = chunks.get(i);
+                List<Extraction.Hit> hits;
+                try {
+                    hits = futures.get(i).get();
+                } catch (Exception e) {
+                    log.warn("ocr-text extract chunk {} failed: {}", i + 1, e.toString());
+                    hits = null;
+                }
+                if (hits == null) {
+                    for (TextPiece piece : chunk) {
+                        failedPages.add(piece.page());
+                    }
+                    continue;
+                }
+                List<Integer> pagesInChunk = pagesOf(chunk);
+                for (Extraction.Hit h : hits) {
+                    if (h.value() == null || h.value().isBlank()) {
+                        continue;
+                    }
+                    acc.computeIfAbsent(h.field(), x -> new LinkedHashMap<>())
+                            .computeIfAbsent(h.value().trim(), x -> new TreeSet<>())
+                            .addAll(clampPages(h.pages(), pagesInChunk, start, end));
+                }
+            }
+        } finally {
+            exec.shutdownNow();
+        }
+    }
+
+    /** 一块文本的字段抽取；失败返回 {@code null}，由调用方按块失败处理。 */
+    private List<Extraction.Hit> extractTextChunk(List<TextPiece> chunk, List<String> fields, int total) {
+        String prompt = "以下是同一份文档的识别文本（全文共 " + total + " 页），每页以【第 N 页】标记开始。\n"
+                + "文本由 OCR/文字层取得，可能有少量错字或断行，取值时尽量保持原文写法、不要自行改写。\n"
+                + "只依据这段文本，为下面每个字段找出它的值以及出现的绝对页码（用【第 N 页】里的页码）。"
+                + "同一字段多页出现就都列页码；这段文本里找不到该字段就不要输出它（不要编造）。\n"
+                + "只输出一个 JSON 对象，不要解释、不要代码围栏。需要抽取的字段：\n"
+                + String.join("\n", fields) + "\n\n输出格式（严格）：\n"
+                + "{\"hits\":[{\"field\":\"字段名\",\"value\":\"值\",\"pages\":[页码数字]}]}\n\n"
+                + "--- 文档内容 ---\n" + pageMarkedText(chunk);
+        String answer = visionClient.askTextOnly(prompt);
+        if (answer.startsWith("Error:")) {
+            log.warn("ocr-text extract chunk error: {}", snippet(answer));
+            return null;
+        }
+        List<Extraction.Hit> hits = Extraction.parseHits(mapper, answer);
+        if (hits == null) {
+            log.warn("ocr-text extract chunk answer not parseable");
+            return null;
+        }
+        return hits;
+    }
+
+    /** 自由问答（OCR 文本通道）。返回 {@code null} 表示 OCR 全失败，调用方回退视觉管线。 */
+    private String understandViaOcr(Path pdf, int start, int end, TreeSet<Integer> imagePages,
+                                    int total, String question, Path taskDir) {
+        PageTexts pt = collectPageTexts(pdf, start, end, imagePages, taskDir);
+        if (pt == null) {
+            return null;
+        }
+        List<List<TextPiece>> chunks = chunkPieces(pt.byPage, props.getPdfs().getTextChunkSize());
+        if (chunks.isEmpty()) {
+            return "这些页 OCR 未识别出文字（可能是空白页或纯图形内容）。";
+        }
+        if (chunks.size() == 1) {
+            return visionClient.askTextOnly(buildTextQaPrompt(chunks.get(0), total, question));
+        }
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < chunks.size(); i++) {
+            String answer = visionClient.askTextOnly(buildTextQaPrompt(chunks.get(i), total, question));
+            if (answer.startsWith("Error:")) {
+                sb.append("[第 ").append(i + 1).append('/').append(chunks.size()).append(" 段处理失败]\n");
+            } else {
+                sb.append(answer).append('\n');
+            }
+        }
+        return sb.toString().trim();
+    }
+
+    private String buildTextQaPrompt(List<TextPiece> chunk, int total, String question) {
+        return "以下是同一份文档的识别文本（全文共 " + total + " 页），每页以【第 N 页】标记开始。"
+                + "文本由 OCR/文字层取得，可能有少量错字。\n"
+                + "只依据这段文本作答，不要编造；引用了文档中的具体内容，请标注它出现的绝对页码。\n要求："
+                + question + "\n\n--- 文档内容 ---\n" + pageMarkedText(chunk);
+    }
+
+    private static String pageMarkedText(List<TextPiece> chunk) {
+        StringBuilder sb = new StringBuilder();
+        for (TextPiece piece : chunk) {
+            sb.append("【第 ").append(piece.page()).append(" 页】\n")
+                    .append(piece.text().trim()).append("\n\n");
+        }
+        return sb.toString();
+    }
+
+    /** 按页装箱成文本块：每块累计字符数不超 {@code chunkSize}；超长单页按字符窗口切分（页码不变）。 */
+    private static List<List<TextPiece>> chunkPieces(LinkedHashMap<Integer, String> byPage, int chunkSize) {
+        List<List<TextPiece>> chunks = new ArrayList<>();
+        List<TextPiece> current = new ArrayList<>();
+        int size = 0;
+        for (var e : byPage.entrySet()) {
+            String text = e.getValue() == null ? "" : e.getValue().trim();
+            if (text.isEmpty()) {
+                continue;
+            }
+            for (int off = 0; off < text.length(); off += chunkSize) {
+                int len = Math.min(chunkSize, text.length() - off);
+                if (size + len > chunkSize && !current.isEmpty()) {
+                    chunks.add(current);
+                    current = new ArrayList<>();
+                    size = 0;
+                }
+                current.add(new TextPiece(e.getKey(), text.substring(off, off + len)));
+                size += len;
+            }
+        }
+        if (!current.isEmpty()) {
+            chunks.add(current);
+        }
+        return chunks;
+    }
+
+    private static List<Integer> pagesOf(List<TextPiece> chunk) {
+        return chunk.stream().map(TextPiece::page).distinct().sorted().toList();
+    }
+
+    /**
+     * 校正模型给的页码：只保留落在本块内的页码；一个都不落在本块内就退回整块页码——
+     * 宁可页码粗一点，也不把已经抽到的值丢掉。
+     */
+    private static List<Integer> clampPages(List<Integer> pages, List<Integer> pagesInChunk, int start, int end) {
+        List<Integer> ok = new ArrayList<>();
+        for (Integer p : pages) {
+            if (p != null && p >= start && p <= end && pagesInChunk.contains(p) && !ok.contains(p)) {
+                ok.add(p);
+            }
+        }
+        return ok.isEmpty() ? pagesInChunk : ok;
+    }
+
     // ---- 结果构造 / 解析 ----
 
     private String buildExtractResult(List<String> fields,
                                       LinkedHashMap<String, LinkedHashMap<String, TreeSet<Integer>>> acc,
                                       TreeSet<Integer> failedPages, int total, int start, int scanEnd,
-                                      boolean incomplete) throws Exception {
+                                      boolean incomplete, String pipeline) throws Exception {
         ObjectNode root = mapper.createObjectNode();
         boolean complete = failedPages.isEmpty() && !incomplete;
         root.put("status", complete ? "complete" : "partial");
@@ -266,6 +616,8 @@ public class PdfService {
         scanned.add(start);
         scanned.add(scanEnd);
         root.put("incomplete", incomplete);
+        root.put("pipeline", pipeline);
+
         if (incomplete) {
             root.put("hint", "只扫描了前 " + (scanEnd - start + 1) + " 页（上限所致），还有第 "
                     + (scanEnd + 1) + " 页起未处理；如需要，用 page_range=\"" + (scanEnd + 1) + "-…\" 再调一次并自行合并。");
@@ -340,17 +692,38 @@ public class PdfService {
         return Math.max(1, k);
     }
 
+    /** 视觉通道栅格化：第 a-b 页 → JPEG data URL 列表。 */
     private List<String> rasterize(Path pdf, int a, int b, int batchId, Path taskDir) throws Exception {
         AgentProperties.Pdfs cfg = props.getPdfs();
-        String prefix = taskDir.resolve("pg" + batchId).toString();
+        List<byte[]> images = rasterizeBytes(pdf, a, b, "pg" + batchId, taskDir,
+                0, cfg.getMaxImageDimension(), cfg.getJpegQuality());
+        List<String> urls = new ArrayList<>(images.size());
+        for (byte[] img : images) {
+            urls.add("data:image/jpeg;base64," + Base64.getEncoder().encodeToString(img));
+        }
+        return urls;
+    }
+
+    /**
+     * 用 {@code pdftoppm} 把第 a-b 页栅格化成 JPEG 字节（按页码排序，临时文件读完即删）。
+     * {@code dpi>0} 下发 {@code -r}（OCR 需要比视觉更高的 dpi）；{@code maxDim>0} 下发
+     * {@code -scale-to}（控体积与 token）。
+     */
+    private List<byte[]> rasterizeBytes(Path pdf, int a, int b, String stem, Path taskDir,
+                                        int dpi, int maxDim, int jpegQuality) throws Exception {
+        String prefix = taskDir.resolve(stem).toString();
         List<String> cmd = new ArrayList<>(List.of("pdftoppm"));
-        if (cfg.getMaxImageDimension() > 0) {
+        if (dpi > 0) {
+            cmd.add("-r");
+            cmd.add(String.valueOf(dpi));
+        }
+        if (maxDim > 0) {
             cmd.add("-scale-to");
-            cmd.add(String.valueOf(cfg.getMaxImageDimension()));
+            cmd.add(String.valueOf(maxDim));
         }
         cmd.add("-jpeg");
         cmd.add("-jpegopt");
-        cmd.add("quality=" + cfg.getJpegQuality());
+        cmd.add("quality=" + jpegQuality);
         cmd.add("-f");
         cmd.add(String.valueOf(a));
         cmd.add("-l");
@@ -371,24 +744,23 @@ public class PdfService {
         if (proc.exitValue() != 0) {
             throw new IllegalStateException("pdftoppm 退出码 " + proc.exitValue() + ": " + snippet(out));
         }
-        final String stem = "pg" + batchId + "-";
+        final String fileStem = stem + "-";
         List<Path> files = new ArrayList<>();
         try (var stream = Files.list(taskDir)) {
             stream.forEach(p -> {
                 String n = p.getFileName().toString();
-                if (n.startsWith(stem) && n.toLowerCase().endsWith(".jpg")) {
+                if (n.startsWith(fileStem) && n.toLowerCase().endsWith(".jpg")) {
                     files.add(p);
                 }
             });
         }
         files.sort(Comparator.comparingInt(PdfService::trailingNumber));
-        List<String> urls = new ArrayList<>(files.size());
+        List<byte[]> images = new ArrayList<>(files.size());
         for (Path f : files) {
-            byte[] bytes = Files.readAllBytes(f);
-            urls.add("data:image/jpeg;base64," + Base64.getEncoder().encodeToString(bytes));
+            images.add(Files.readAllBytes(f));
             Files.deleteIfExists(f);
         }
-        return urls;
+        return images;
     }
 
     private static int trailingNumber(Path p) {
@@ -546,6 +918,21 @@ public class PdfService {
         }
         s = s.replaceAll("\\s+", " ").trim();
         return s.length() <= 200 ? s : s.substring(0, 200) + "…";
+    }
+
+    /** OCR 文本通道的一块文本：绝对页码 + 该页（或该页的一段）文本。 */
+    private record TextPiece(int page, String text) {
+    }
+
+    /** OCR 文本通道的汇总：成功页→文本，以及 OCR 失败的页。 */
+    private static final class PageTexts {
+        final LinkedHashMap<Integer, String> byPage;
+        final TreeSet<Integer> failedPages;
+
+        PageTexts(LinkedHashMap<Integer, String> byPage, TreeSet<Integer> failedPages) {
+            this.byPage = byPage;
+            this.failedPages = failedPages;
+        }
     }
 
     /** 单批输出。 */

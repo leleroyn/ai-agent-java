@@ -12,6 +12,8 @@
 核心设计取向：
 - **框架内调用**：AgentScope 是 JVM 内 Java 库，无子进程、无临时文件、无文件轮询。
 - **图片/文档与主模型解耦**：图像字节、PDF 栅格化页图只发到独立的视觉模型（`agent.vision`），**永不进入主模型上下文**；主模型只拿文字结果。
+- **扫描页走 OCR 换文本**：PDF 里含图片的页（扫描件、插图页）用 `pdfimages` 探测出来，逐页送 OCR 服务（`agent.ocr`）换文本，
+  其余页直接取 `pdftotext` 文字层，之后的抽取/问答只发文本；OCR 未启用或连不上才回退视觉模型。
 - **双模型档位**：`flash`（默认）/ `pro`，按任务 `model` 字段选用；两套完全独立配置。
 - **工具自注册**：自定义工具通过 SPI 贡献，加/改工具只动一个模块（见 §4）。
 
@@ -38,6 +40,7 @@ AgentTaskRunner → ReActAgent.call(msgs, schemaNode, ctx)
    └─ StructuredOutputConverter       按 profile 的 structured-output-mode 产出合规 JSON
    ▼
 自定义工具 → VisionClient（图片）/ PdfService（PDF）→ agent.vision 视觉模型
+                                    └─ PdfService 含图片的页 → OcrClient → agent.ocr OCR 服务（换文本后仍走纯文本抽取）
 ```
 
 结构化输出走两条路径之一（由 profile 的 `structured-output-mode` 决定：`auto|native|tool|two_phase|off`）：模型原生 `response_format`，或注入合成工具产出。
@@ -58,7 +61,9 @@ ai-agent-java/                         Maven 父工程 (packaging=pom, groupId c
 │       ├── config/    AgentProperties        @ConfigurationProperties("agent")
 │       ├── model/     AgentTaskRequest · TaskRecord · TaskStatus · TaskStatusView · TaskError · TaskUsage
 │       ├── service/   VisionClient           独立视觉模型客户端（图片/扫描页字节只发到 agent.vision）
+│       │              OcrClient             独立 OCR 服务客户端（multipart 上传页图，只回文本）
 │       │              PdfService             整篇遍历 + 分批并发结构化抽取 + 确定性归并 + 页码溯源
+│       │                                   含图片的页走 OCR 文本通道，其余页取文字层
 │       ├── support/   MediaInputs · Extraction · SandboxPaths     入参解析 / 抽取归并 / 沙箱路径校验
 │       ├── error/     AgentException · ErrorCodes
 │       └── spi/       AgentToolProvider · ToolContext             工具自注册接口
@@ -174,7 +179,8 @@ ai-agent-java/                         Maven 父工程 (packaging=pom, groupId c
 | `agent.runner` | `name` `sys-prompt` `max-iters` `permission-mode`(默认 `BYPASS`) |
 | `agent.execution` | `max-concurrent`(4) `default-timeout-seconds`(120) `max-timeout-seconds`(900) `lease-seconds`(90) `lease-reap-seconds`(30) `max-attempts`(2) `poll-interval-ms` `claim-peek` `max-queued-tasks`(1000) |
 | `agent.tools.*` | 自定义工具按 provider 名开关（默认开）+ 框架内置 `shell/read-file/write-file/todo` + `working-dir` `shell-allowed-commands` `delete-workspace-on-finish` |
-| `agent.pdf` | `enabled` `pages-per-call` `concurrency` `max-pages` `max-image-dimension` `jpeg-quality` `timeout-seconds` `max-download-bytes` |
+| `agent.pdfs` | `enabled` `pages-per-call` `concurrency` `max-pages` `max-image-dimension` `jpeg-quality` `timeout-seconds` `max-download-bytes` `text-chunk-size` `text-chunk-overlap` `ssrf-allowlist` |
+| `agent.ocr` | OCR 服务（含图片的 PDF 页换文本）：`enabled` `base-url` `concurrency` `timeout-seconds` `rasterize-dpi` `max-image-dimension` `jpeg-quality` `resize` `use-cls` `format` `app-id` |
 | `agent.skills` | `enabled` `directory` `classpath-location` `code-execution-enabled` `max-requested` `max-inline-chars` |
 
 数据源：`serverTimezone=Asia/Shanghai`（见 §5 时间说明）。
