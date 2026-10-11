@@ -9,6 +9,7 @@ import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
+import java.util.List;
 
 /**
  * 「文档来源」统一落地成本地可读文件：http(s) URL 下载到指定临时目录，本地路径必须落在任务沙箱内。
@@ -19,7 +20,8 @@ import java.security.MessageDigest;
  * 工具自己吃 URL 之后，本地副本根本不会出现。
  *
  * <p>安全：本地路径经 {@link SandboxPaths} 严格限制在 {@code taskDir} 内，越界一律拒绝；
- * URL 下载有体积上限（防 DoS），落点是调用方给的临时目录，由调用方用完删除。
+ * URL 一律先过 {@link #validateUrl} 的 SSRF 主机白名单，下载有体积上限（防 DoS），
+ * 落点是调用方给的临时目录，由调用方用完删除。
  */
 public final class SourceFiles {
 
@@ -46,8 +48,10 @@ public final class SourceFiles {
      * @param taskDir  任务沙箱目录，本地路径的边界
      * @param tempDir  URL 下载的落点；{@code null} 表示落在 {@code taskDir}
      * @param maxBytes 下载体积上限
+     * @param ssrfAllowlist SSRF 主机白名单（后缀匹配），空=不限制
      */
-    public static Fetched fetch(String ref, Path taskDir, Path tempDir, int maxBytes) {
+    public static Fetched fetch(String ref, Path taskDir, Path tempDir,
+                                int maxBytes, List<String> ssrfAllowlist) {
         if (ref == null || ref.isBlank()) {
             return new Fetched(null, false, "Error: 未提供来源。");
         }
@@ -57,7 +61,7 @@ public final class SourceFiles {
                 Path dir = tempDir != null ? tempDir : taskDir;
                 Files.createDirectories(dir);
                 Path target = dir.resolve("src-" + System.nanoTime());
-                return new Fetched(download(URI.create(s), target, maxBytes), true, null);
+                return new Fetched(download(validateUrl(s, ssrfAllowlist), target, maxBytes), true, null);
             }
             Path local = SandboxPaths.resolveWithin(taskDir, s);
             if (local == null) {
@@ -71,6 +75,39 @@ public final class SourceFiles {
             return new Fetched(null, false,
                     "Error: 读取来源失败：" + e.getClass().getSimpleName() + ": " + e.getMessage());
         }
+    }
+
+    /**
+     * URL 合法性 + SSRF 主机白名单（后缀匹配）。白名单为空时只校验 scheme。
+     *
+     * <p>所有文档抓取都走这一个判定：OCR 转文本、印章、发票、PDF 理解。之前只有
+     * {@code PdfService.validateUrl} 查白名单，另外两条通道直接 {@code URI.create}，
+     * 运维配了也拦不住。
+     */
+    public static URI validateUrl(String url, List<String> allow) {
+        if (url == null || url.isBlank()) {
+            throw new IllegalArgumentException("文档来源 URL 为空");
+        }
+        URI uri = URI.create(url.trim());
+        String scheme = uri.getScheme();
+        if (scheme == null || !(scheme.equalsIgnoreCase("http") || scheme.equalsIgnoreCase("https"))) {
+            throw new IllegalArgumentException("文档来源必须是 http/https，收到：" + url);
+        }
+        if (allow == null || allow.isEmpty()) {
+            return uri;
+        }
+        String host = uri.getHost();
+        if (host == null) {
+            throw new IllegalArgumentException("无法解析主机名：" + url);
+        }
+        String h = host.toLowerCase();
+        for (String entry : allow) {
+            String e = entry == null ? "" : entry.trim().toLowerCase();
+            if (!e.isEmpty() && (h.equals(e) || h.endsWith("." + e))) {
+                return uri;
+            }
+        }
+        throw new IllegalArgumentException("主机不在允许的白名单内：" + host);
     }
 
     /** 文件内容的 SHA-256（十六进制）。用来把「同一份内容」认出来，与来源字符串无关。 */

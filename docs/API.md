@@ -463,12 +463,28 @@ UPDATE agent_task SET callback_status='pending'
 - `units` 含义：单个来源时＝文本块序号（按字符切块，不是页码）；多个来源时＝来源序号（按 `source` 里的顺序，从 1 起）。
 - 同一字段抽到多个不同值时**不会**摊成多条互斥结果：`value` 是权威值（非占位符优先 → 出现次数多优先 → 首次出现更早优先），其余候选放进 `alternates`，各带自己的 `units`。这样下游不必再猜哪条算数、也不必换工具自查。
 - 抽取器自己补出来的、未被请求的字段进 `extra`，不与 `results` 混在一起。
-- `status`：`complete`＝所有单元都成功；`partial`＝有单元失败，失败单元在 `failed_units`。
+- `status`：`complete`＝所有单元都成功；`partial`＝有单元失败，失败单元在 `failed_units`。**OCR 缺页也算 partial**（此时另有 `partial_note` 说明缺了哪些来源，且不再带 `null_note`）。
 - 抽取管线只有一条：图片/PDF 先 OCR 成文本（PDF 逐页识别、按页追加到 `.ocr/` 下的同名 `.txt`，每页前有 `--- 第 N 页 ---`），再按字符切块抽取。没有页型探测，也没有视觉/OCR 双通道回退。
 - OCR 原文只出现在任务目录的 `.ocr/` 子目录里：工具返回值不含该路径，全文也不常驻内存（按块读）。它在**整次任务内保留**，任务跑完由服务端删掉整个 `.ocr/`，原文不留盘。
-- 一次任务内同一份内容只 OCR 一次：txt 文件名带内容的 SHA-256 前缀，文件已存在就直接复用（模型先抽 5 个字段再补抽 1 个时不会把 72 页重新识别一遍）。按来源字符串去重做不到这点——模型自己 `curl -o` 出来的本地副本和原 URL 是两个 key。**没有内存缓存**：工具实例不保存全文或结果副本，几十 MB 的扫描件文本不压在堆上。
+- 一次任务内同一份内容只 OCR 一次：txt 文件名带内容的 SHA-256 前缀，文件已存在就直接复用（**仅限完整产物**，见下一条）（模型先抽 5 个字段再补抽 1 个时不会把 72 页重新识别一遍）。按来源字符串去重做不到这点——模型自己 `curl -o` 出来的本地副本和原 URL 是两个 key。**没有内存缓存**：工具实例不保存全文或结果副本，几十 MB 的扫描件文本不压在堆上。
+- OCR 有页失败时不算「全文已遍历」：txt 里留一行 `--- 第 N 页 OCR 失败（该页内容缺失）---`，
+  产物改名带 `-partial`（不参与复用，下次调用重跑），返回值改为 `status=partial` + `partial_note`、
+  去掉 `null_note`。一页瞬时故障不能被宣告成「文档里没有这个字段」。
+- 所有文档抓取（OCR 转文本、`recognize_seal`、`recognize_invoice`、PDF 理解）都过同一个
+  `agent.pdfs.ssrf-allowlist` 主机白名单（后缀匹配，留空=不限制）。
+- **工具幂等**：`extract_document_fields` / `understand_document` / `recognize_seal` / `recognize_invoice` 每次调用先查
+  任务目录里的 `.ocr/calls.json`——同一工具 + 同一组参数（来源列表、字段列表都排序归一，「A B」与「B A」同一个 key）
+  第二次调用**直接返回第一次的返回**，不重 OCR、不重跑模型、不再打接口。台账只存工具自己的结构化结论
+  （超过 32000 字符就不存）。**计数与存结果是两件事**：以 `Error:` 开头的返回、以及 seal/invoice 里所有来源都失败的
+  返回（`status=error`）不存结果（接口抖动可以重试），但仍然计数，否则模型对着一个一直失败的来源会无限重试；
+  OCR 全文、图片字节都不进台账也不进内存，
+  任务目录删掉台账就没了，跨任务也不复用——它是重复调用闸，不是内容缓存。
+  另外三个工具（seal / invoice / understand）还有硬闸：一次任务最多**真跑** 4 次，超了直接返回拒绝文案；
+  `extract_document_fields` 用的是上面那条「同一来源最多抽 3 次」的闸。`get_system_time` 不参与幂等。
+
 - 藏进子目录本身拦不住模型（`list_directory` 不过滤点开头目录，`view_text_file` 也不校验后缀），所以隔离靠不注册读文件的工具，见下一条。
 - 想彻底断掉「模型换工具自查」，就把内置文件工具关掉：`AGENT_TOOL_READ=false`（同时去掉 `view_text_file` 和 `list_directory`）、必要时 `AGENT_TOOL_SHELL=false`。框架的权限规则只能按工具名 deny，做不到按路径，所以路径级隔离只能靠不注册工具。
+- **shell 建议直接关（`AGENT_TOOL_SHELL=false`）**：框架的 shell 工具不截断输出，模型 `curl` 一个大文件到 stdout 会把整个文件灌进主模型上下文（实测 30MB PDF ≈ 13.7 万字符二进制），任务随即空转到 max-iters 无结果；`AGENT_SHELL_ALLOWED=curl` 只约束可执行文件名，管不住输出体积，且 curl 落盘的本地副本还能绕过 `AGENT_PDF_SSRF_ALLOWLIST`（本地路径不再走 URL 白名单校验）。文档工具都直接吃 URL，关掉 shell 不影响任何正常能力。
 - OCR 文本通道**只用于字段抽取**。`understand_document` 对 PDF 始终走视觉，因为 OCR 文本会丢掉版面与图形信息。
 - `understand_document` **不暴露页范围**：PDF 按 `min(agent.pdfs.pages-per-call, agent.vision.max-images)` 页一批，服务端遍历全部页、每批问同一个问题，再用 `agent.text-model` 把各批归并成**一段**回答（批与批并发，`agent.pdfs.understand-parallelism` 默认 2，归并仍严格按批序）；图片来源超过 `max-images` 同样自动分批。TXT 超过一个文本块也一样分批归并。失败批次会在回答末尾列出，不会静默丢页——早先"超过单次上限就返回一段文案让模型自己用 `page_range` 分批"的做法已删掉，它把遍历全文的责任推给了模型，实测模型会为一个问题连开 5 次不同页范围。
 - **文档类指令必须真的读文件**：指令里点名了文档文件（`http(s)` URL 带 pdf/jpg/png/txt/… 后缀）、但整趟运行一个工具都没调时，服务端会带「必须先调工具」的硬约束重试一次；仍不调工具就 `status=failed` + `error.code=NO_RESULT`，绝不把模型凭记忆编出来的字段值当结果返回。要退回「只告警不拦截」，设 `AGENT_FORCE_DOCUMENT_TOOL=false`。
@@ -481,7 +497,7 @@ UPDATE agent_task SET callback_status='pending'
 
 - `source` 直接吃 `http(s)` URL 或任务目录内的路径，可多个（空格/换行分隔）；**下载在工具内部完成**，模型不需要也不应该先 `curl -o` 落盘。
 - 返回 `{status, results:[{source, ...}]}`，`status` = `ok` / `partial` / `error`；单个来源失败只影响它自己，原因在该来源的 `error` 里。
-- 返回值只含结构化结论，**不含图片 base64**（印章裁剪图固定不取），也不做内存缓存：每个来源调一次就够。
+- 返回值只含结构化结论，**不含图片 base64**（印章裁剪图固定不取）。内存里没有缓存，幂等靠任务目录里的调用台账（见 6.1）：同一组参数第二次调用直接返回上次结果，所以每个来源调一次就够。
 - 服务地址：`agent.ips.base-url`——OCR / 印章 / 发票是同一台服务的三个接口，一个基址管三个。
 
 `recognize_seal` → `results[].seals[] = {confidence, seal_type, company}`（`seal_type` 1=圆形红章、2=圆形灰章；`company` 即接口 `ocr_result`），另有 `seal_count`。`seals=[]` 表示未检出印章，是权威结论而非错误。

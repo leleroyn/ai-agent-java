@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.jtzj.agent.core.config.AgentProperties;
 import com.jtzj.agent.core.service.IpsClient;
 import com.jtzj.agent.core.service.OcrTextService;
+import com.jtzj.agent.core.support.CallLedger;
 import io.agentscope.core.message.ToolResultBlock;
 import io.agentscope.core.tool.Tool;
 import io.agentscope.core.tool.ToolParam;
@@ -30,6 +31,9 @@ public class InvoiceRecognitionTools {
 
     private static final Logger log = LoggerFactory.getLogger(InvoiceRecognitionTools.class);
 
+    private static final String TOOL = "recognize_invoice";
+    private static final int MAX_CALLS_PER_TOOL = 4;
+
     private final IpsClient ips;
     private final AgentProperties props;
     private final ObjectMapper mapper;
@@ -51,8 +55,9 @@ public class InvoiceRecognitionTools {
                     + "字段已由接口解析好，直接放在 fields 里（接口口径的字段名，不要改名）："
                     + "发票号码/发票代码/开票日期/购货方公司名称(=购买方)/销售方公司名称(=销售方)/"
                     + "发票金额(不含税)/发票总金额(=价税合计)/校验码/是否抵扣联/是否含有国税局印章。"
-                    + "同一份内容在一次任务里只调一次接口，重复调用只会拿到同一份结果。"
-                    + "每个来源调用一次就够了，返回的就是权威结果；重复调用只会重新识别一遍，更慢且不会更准。"
+                    + "本工具自带幂等：同一组参数在一次任务里只真跑一次，重复调用直接返回上次结果（不重复打接口）；"
+                    + "一次任务最多真跑 " + MAX_CALLS_PER_TOOL + " 次，超了直接拒绝。"
+                    + "每个来源调用一次就够了，返回的就是权威结果，不要用它做二次确认。"
                     + "返回 {status, results:[{source, confidence, fields}]}；检测不到有效发票时该来源返回 error（附接口给的原因）。",
             readOnly = true,
             concurrencySafe = true)
@@ -77,12 +82,28 @@ public class InvoiceRecognitionTools {
 
     private String recognize(String source, Boolean returnOcrText, Double initConfidence) {
         if (!ips.isEnabled()) {
-            return "Error: 发票识别通道未启用（agent.ips.enabled=false，或 agent.ips.base-url 与 agent.ocr.base-url 都没配）。";
+            return "Error: 发票识别通道未启用（agent.ips.enabled=false 或未配 agent.ips.base-url）。";
         }
         boolean ocrText = returnOcrText == null || returnOcrText;
+        String key = CallLedger.key(TOOL, CallLedger.normalizeSources(source),
+                String.valueOf(ocrText),
+                initConfidence == null ? "" : String.valueOf(initConfidence));
+        CallLedger ledger = CallLedger.load(taskDir);
+        String cached = ledger.cached(key);
+        if (cached != null) {
+            log.info("recognize_invoice idempotent hit key={} already_run={}", key, ledger.toolCalls(TOOL));
+            return cached;
+        }
+        int used = ledger.toolCalls(TOOL);
+        if (used >= MAX_CALLS_PER_TOOL) {
+            log.warn("recognize_invoice refused after {} calls in this task", used);
+            return "Error: recognize_invoice 在本次任务里已真跑 " + used
+                    + " 次，同一份内容再识别一遍结论不会变。请用已有结果作答，"
+                    + "不要换来源或换工具重试。";
+        }
         List<IpsRecognitionSupport.Outcome> outcomes = IpsRecognitionSupport.callAll(
                 source, taskDir, taskDir.resolve(OcrTextService.SCRATCH_DIR), props,
-                (bytes, filename, ocr, conf) -> ips.invoice(bytes, filename, ocr, conf),
+                (file, filename, ocr, conf) -> ips.invoice(file, filename, ocr, conf),
                 ocrText, initConfidence);
         if (outcomes.isEmpty()) {
             return "Error: 未提供任何来源（URL 或本任务目录下的文件路径）。";
@@ -127,6 +148,7 @@ public class InvoiceRecognitionTools {
         env.put("status", ok == 0 ? "error" : (ok < outcomes.size() ? "partial" : "ok"));
         log.info("recognize_invoice sources={} ok={} return_ocr_text={}",
                 outcomes.size(), ok, ocrText);
+        ledger.record(key, TOOL, env.toString(), ok > 0);
         return env.toString();
     }
 

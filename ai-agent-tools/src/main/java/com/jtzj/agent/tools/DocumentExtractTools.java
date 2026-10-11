@@ -3,6 +3,7 @@ package com.jtzj.agent.tools;
 import com.jtzj.agent.core.config.AgentProperties;
 import com.jtzj.agent.core.service.OcrTextService;
 import com.jtzj.agent.core.service.TextService;
+import com.jtzj.agent.core.support.CallLedger;
 import com.jtzj.agent.core.support.Extraction;
 import com.jtzj.agent.core.support.MediaInputs;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -53,6 +54,7 @@ public class DocumentExtractTools {
 
     /** 同一来源在一次任务里最多抽几次：1 次正常抽取 + 2 次余量（OCR 部分失败、字段确实要补）。 */
     private static final int MAX_EXTRACT_CALLS_PER_SOURCE = 3;
+    private static final String TOOL = "extract_document_fields";
 
     private final OcrTextService ocrTextService;
     private final TextService textService;
@@ -78,6 +80,7 @@ public class DocumentExtractTools {
                   + "返回值就是权威结果：value=null 表示全文已完整遍历、并按语义匹配过别名仍未出现该字段，"
                   + "这就是终局结论——不得换个字段名再抽一遍，也不得改用 understand_document 补这个字段。"
                   + "抽取类任务调本工具一次就够了；同一来源超过抽取次数上限会被直接拒绝（不重跑）。"
+                  + "本工具自带幂等：同一组（来源+字段）在一次任务里只真跑一次，重复调用直接返回上次结果（不重 OCR、不重跑模型）。"
                     + "返回 {status, total_units, results:[{field, value, units, alternates?}], extra?, failed_units}。"
                     + "units: 文本块序号（单个来源时）或来源序号（多个来源时）。",
             readOnly = true,
@@ -107,11 +110,22 @@ public class DocumentExtractTools {
         if (fields.isEmpty()) {
             return "Error: fields 为空，请指定要抽取的字段（多个用 ; 逗号 、 或换行分隔）。";
         }
+        List<String> orderedFields = new ArrayList<>(fields);
+        orderedFields.sort(String::compareTo);
+        String key = CallLedger.key(TOOL, CallLedger.normalizeSources(source),
+                String.join("\n", orderedFields));
+        CallLedger ledger = CallLedger.load(taskDir);
+        String cached = ledger.cached(key);
+        if (cached != null) {
+            log.info("doc extract idempotent hit key={} already_run={}", key, ledger.toolCalls(TOOL));
+            return cached;
+        }
 
         // 1) 每个来源先换成一份文本文件（TXT 直接用，图片/PDF 走 OCR，txt 落在 .ocr/ 下，本次任务内按来源复用）。
         //    txtOfRef 与 refs 下标对齐，转换失败的来源留 null；同一来源在本次运行内只转一次。
         List<String> txtOfRef = new ArrayList<>(refs.size());
         List<String> failures = new ArrayList<>();
+        List<String> partialRefs = new ArrayList<>();
         int usable = 0;
         for (String ref : refs) {
             if (".txt".equals(MediaInputs.extension(ref))) {
@@ -127,6 +141,9 @@ public class DocumentExtractTools {
             } else {
                 txtOfRef.add(txt);
                 usable++;
+                if (txt.endsWith(OcrTextService.PARTIAL_SUFFIX + ".txt")) {
+                    partialRefs.add(ref);
+                }
             }
         }
         if (usable == 0) {
@@ -144,6 +161,12 @@ public class DocumentExtractTools {
         if (over == usable) {
             log.warn("doc extract refused (every source already extracted {} times) sources={}",
                     MAX_EXTRACT_CALLS_PER_SOURCE, refs);
+            if (!partialRefs.isEmpty()) {
+                return "Error: 这些来源已抽取过 " + MAX_EXTRACT_CALLS_PER_SOURCE
+                        + " 次，且其中有来源 OCR 不完整（" + String.join("、", partialRefs)
+                        + "）。请基于已识别的内容作答，缺页导致的 null 已在结果里标注，"
+                        + "不要换字段名重试。";
+            }
             return "Error: 这些来源在本次任务里已经抽取过 " + MAX_EXTRACT_CALLS_PER_SOURCE
                     + " 次，再抽一遍结论不会变。value=null 就是终局结论：不要再抽取、不要换字段名重试、"
                     + "也不要用 understand_document 补这个字段。请用已有结论作答。";
@@ -155,7 +178,9 @@ public class DocumentExtractTools {
 
         // 2) 单来源：直接返回分块抽取结果（units=块号）
         if (refs.size() == 1 && usable == 1) {
-            String single = textService.extractFields(txtOfRef.get(0), fieldsRaw, taskDir);
+            String single = annotatePartial(
+                    textService.extractFields(txtOfRef.get(0), fieldsRaw, taskDir), partialRefs);
+            ledger.record(key, TOOL, single);
             return single;
         }
 
@@ -190,8 +215,35 @@ public class DocumentExtractTools {
                 .add(i + 1);
             }
         }
-        String merged = buildResult(fields, acc, failedUnits, refs.size());
+        String merged = annotatePartial(buildResult(fields, acc, failedUnits, refs.size()), partialRefs);
+        ledger.record(key, TOOL, merged);
         return merged;
+    }
+
+    /**
+     * OCR 不完整时改写返回契约：status=partial、去掉「终局结论」的 null_note、
+     * 加 partial_note 说明缺了哪些来源。否则一次瞬时的 OCR 失败会被说成
+     * 「全文都没有这个字段」，且接下来的重试机会被数量闸挡掉。
+     */
+    private String annotatePartial(String json, List<String> partialRefs) {
+        if (partialRefs.isEmpty()) {
+            return json;
+        }
+        try {
+            JsonNode node = mapper.readTree(json);
+            if (!(node instanceof ObjectNode root)) {
+                return json;
+            }
+            root.put("status", "partial");
+            root.remove("null_note");
+            root.put("partial_note", "部分来源 OCR 不完整（" + String.join("、", partialRefs)
+                    + "），文本有缺口。value=null 只说明已识别的部分里没有这个字段，"
+                    + "不代表文档里没有；允许对同一来源重试一次。");
+            return mapper.writeValueAsString(root);
+        } catch (Exception e) {
+            log.warn("annotate partial failed, keep raw result", e);
+            return json;
+        }
     }
 
     /** 归并成统一契约：每个请求字段恰好一条权威 value，其余候选进 alternates。 */

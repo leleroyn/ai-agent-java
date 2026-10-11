@@ -171,8 +171,10 @@ agent:
     # 页边界打包用不到重叠；退回字符窗口时留一点，避免正好劈开一个值。
     text-chunk-overlap: ${AGENT_PDF_TEXT_CHUNK_OVERLAP:400}
     # SSRF 主机白名单（后缀匹配）；留空=允许任意 http/https（与图片工具一致）。
-    # ssrf-allowlist:
-    #   - internal.example
+    # 约束所有文档抓取：OCR 转文本、recognize_seal、recognize_invoice、PDF 理解。
+    # 环境变量 AGENT_PDF_SSRF_ALLOWLIST（逗号分隔）。
+    # 之前这里只有注释、没有绑定，.env.example 里写的那个键实际上拿不到。
+    ssrf-allowlist: ${AGENT_PDF_SSRF_ALLOWLIST:}
 
   # 综合服务平台（IPS）：OCR / 印章 / 发票三个接口，同一台服务、同一个基址。
   #   POST /api/v3/ocr/preprocess      抽取类任务的统一文本通道（图片与 PDF 一律先 OCR 换文本）

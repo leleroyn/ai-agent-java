@@ -4,6 +4,7 @@ import com.jtzj.agent.core.config.AgentProperties;
 import com.jtzj.agent.core.service.PdfService;
 import com.jtzj.agent.core.service.TextService;
 import com.jtzj.agent.core.service.VisionClient;
+import com.jtzj.agent.core.support.CallLedger;
 import com.jtzj.agent.core.support.QaMerge;
 import com.jtzj.agent.core.support.MediaInputs;
 import io.agentscope.core.message.ToolResultBlock;
@@ -12,6 +13,8 @@ import io.agentscope.core.tool.ToolParam;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * 文档<b>自由理解</b>工具 {@code understand_document}：支持图片、PDF、TXT。
@@ -20,6 +23,11 @@ import java.util.List;
  * <p>混合类型时分别处理各类型，结果拼接；不跨类型对比。
  */
 public class DocumentUnderstandTools {
+
+    private static final Logger log = LoggerFactory.getLogger(DocumentUnderstandTools.class);
+
+    private static final String TOOL = "understand_document";
+    private static final int MAX_CALLS_PER_TOOL = 4;
 
     private final VisionClient visionClient;
     private final PdfService pdfService;
@@ -44,7 +52,11 @@ public class DocumentUnderstandTools {
                     + "抽取类任务调一次抽取工具就结束了。"
                     + "PDF/TXT 会服务端分批遍历全部内容并归并成一段回答，图片过多也会自动分批归并："
                     + "不需要、也不要指定页范围，工具自己覆盖全文。"
-                    + "多个图片来源可跨图对比；混合类型时分别处理各类型结果拼接，不跨类型对比。返回自然语言文本。",
+                    + "图片来源在同一批内可跨图对比（一批最多 agent.vision.max-images 张）；"
+                    + "超出会自动分批、各批独立识别后归并，跨批不对比。"
+                    + "混合类型时分别处理各类型结果拼接，不跨类型对比。返回自然语言文本。"
+                    + "本工具自带幂等：同一组（来源+问题）在一次任务里只真跑一次，重复调用直接返回上次结果；"
+                    + "一次任务最多真跑 " + MAX_CALLS_PER_TOOL + " 次，超了直接拒绝。",
             readOnly = true,
             concurrencySafe = true)
     public ToolResultBlock understand(
@@ -70,6 +82,20 @@ public class DocumentUnderstandTools {
         List<String> refs = MediaInputs.parse(source);
         if (refs.isEmpty()) {
             return "Error: 未提供任何文档来源。";
+        }
+        String key = CallLedger.key(TOOL, CallLedger.normalizeSources(source), question);
+        CallLedger ledger = CallLedger.load(taskDir);
+        String cached = ledger.cached(key);
+        if (cached != null) {
+            log.info("understand_document idempotent hit key={} already_run={}", key, ledger.toolCalls(TOOL));
+            return cached;
+        }
+        int used = ledger.toolCalls(TOOL);
+        if (used >= MAX_CALLS_PER_TOOL) {
+            log.warn("understand_document refused after {} calls in this task", used);
+            return "Error: understand_document 在本次任务里已真跑 " + used
+                    + " 次，同一组来源和问题再理解一遍结论不会变。抽取类任务的 null 是终局结论，"
+                    + "不要用本工具补。请用已有结论作答。";
         }
 
         List<String> images = new ArrayList<>();
@@ -121,6 +147,8 @@ public class DocumentUnderstandTools {
             result.append(out);
         }
 
-        return result.length() == 0 ? "Error: 无法识别文档类型。" : result.toString();
+        String answer = result.length() == 0 ? "Error: 无法识别文档类型。" : result.toString();
+        ledger.record(key, TOOL, answer);
+        return answer;
     }
 }

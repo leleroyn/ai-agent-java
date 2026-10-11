@@ -208,6 +208,7 @@ ai-agent-java/                         Maven 父工程 (packaging=pom, groupId c
 
 - **权限模式**：默认 `BYPASS`，且框架内置 shell / 读写文件默认开启——但文件与 shell 的**工作目录被沙箱到该任务私有目录** `<working-dir>/<taskId>`，AgentScope 在执行期强制，越界拒绝。等于"沙箱内的远程命令执行"。
 - **硬化手段**：收紧 `agent.tools.*`（关 shell/写文件）、把 `permission-mode` 调到 `EXPLORE`/更严格、配 `shell-allowed-commands` 白名单、`delete-workspace-on-finish` 控制产物留存。
+- **shell 的实际风险不止「能跑命令」**：框架的 shell 工具对输出没有上限，模型 `curl` 一个大文件到 stdout 就等于把整个文件读进主模型上下文（实测 30MB PDF ≈ 13.7 万字符，直接撑爆并耗尽 max-iters）；白名单只按可执行文件名拦，拦不住这种输出。加上文档工具已能直接吃 URL，curl 没有正当用途，生产与测试环境均置 `AGENT_TOOL_SHELL=false`。
 - **本地文件入参**：`SandboxPaths` 严格限制在任务沙箱内，越界拒绝；本地源文件不删除。
 - **鉴权**：本服务**不含鉴权**（API Key/mTLS 由上游网关负责，接口对外前必须前置鉴权）。
 - **注入面**：`outputSchema`/`skills` 会进 prompt，提交时校验（技能名白名单正则、数量与注入字符上限；未安装的技能名忽略并记 WARN，不报错）。
@@ -229,10 +230,23 @@ AgentScope 2.0.3 自带 `io.agentscope.core.skill`，格式与 Claude/pi skills 
 **目录分工**：`docs/examples/skills/` 是可运行示例；`agent-skills/` 是运维挂载点（默认只 README，内容属部署产物不入库）。
 
 **抽取即终局（为什么禁止用 `understand_document` 补 null 字段）**：抽取子模型每次都遍历全部文本块并按语义匹配别名（`TextService` 的提示词），所以「换个字段名再抽一遍」和「用视觉补一处」都必然同解。早先 sys-prompt 里「字段 null 时可以用 understand_document 补这一处」是一条**授权**，模型据此把 2 页扫描件跑成 14 次抽取 + 6 次视觉（188s，字段其实全对）。现在三处一起收口：返回值里带 `null_note` 说明 null 即终局；sys-prompt 改成「抽取类任务调一次抽取工具就结束，绝不用 understand_document 补字段」；`DocumentExtractTools.Attempts` 按来源计数（`.ocr/extracted.json`，只存计数不存正文）超过 3 次直接拒绝。
+**例外是 OCR 自己不完整**：有页失败时 txt 里写明缺口、产物改名带 `-partial`（不参与复用，下次重跑），
+返回值换成 `partial_note`、去掉 `null_note`——否则一次瞬时的服务报错会被永久固化成「文档里没这个字段」。
 
 **纯文本子调用不用视觉端点（`agent.text-model`）**：图片/PDF 一旦 OCR 成 txt，抽取和 QA 手上就只剩文本，此时调的是 `agent.vision` 那个 VL 模型，纯属将就。实测同一份营业执照的 OCR 文本（680 字符、单块、`temperature=0`）：字段列表给 6 个时稳定漏掉 `成立日期`（文本里明写 `成立日期 1989年09月09日`），只给 3 个就正常；同一提示词换成文本模型 `pro` 则 6/6 全对。所以 `askTextOnly` 默认改走 `agent.text-model`（默认 `pro`），只有真带图的请求才去视觉端点。
 
+**工具幂等（4 个文档/识别工具共用一份调用台账）**：模型会在一次任务里把同一个来源反复喂给同一个工具
+（实测 `recognize_seal` 连调 4 次、`understand_document` 连调 5 次），每次都是真实的 IPS/模型调用，而结论不会变。
+台账落在任务目录 `.ocr/calls.json`：key＝工具名＋归一化参数，命中就直接返回上次的返回；失败不存结果（可重试）但照样计数，
+否则模型对着一个一直失败的来源会无限重试；
+seal/invoice/understand 另有「一次任务最多真跑 4 次」的硬闸。台账只存结构化结论（≤32000 字符），不存全文、
+不常驻内存，随任务目录一起删——它是重复调用闸，不是内容缓存。`get_system_time` 不参与。
+
 **印章/发票为什么不再是「curl 技能」**：这两个接口只吃 multipart 文件、不吃 URL，技能里的 curl 示例会逼模型先 `curl -o` 把文件下载进工作目录，于是同一份内容出现「URL」和「本地副本」两个身份（按来源做的去重必然失效），模型还会把没拿到值的印章字段丢回 `extract_document_fields` 去补——实测为 1 个字段把 72 页重新 OCR 一遍、87s 后撞超时。现在调用与下载都在内置工具 `recognize_seal` / `recognize_invoice` 里，参数、返回结构、字段别名和「什么算权威结论」全部写进工具描述，两个 SKILL.md 已删除——调用方在 instruction 里直接点名工具即可。
+上传侧也不整份读进内存：请求体先落到任务的 `.ocr/` 沙箱再用 `BodyPublishers.ofFile` 流式发送，
+堆占用与文件大小无关（之前 `readAllBytes` + `ByteArrayOutputStream` + `toByteArray()` 三次完整副本，
+一份 200MB 的 PDF 单次调用就能吃掉 600MB 堆）。SSRF 主机白名单也统一到 `SourceFiles.validateUrl`，
+OCR 转文本、印章、发票、PDF 理解四条抓取通道都过它。
 
 ---
 

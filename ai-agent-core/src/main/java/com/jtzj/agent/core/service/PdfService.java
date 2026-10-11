@@ -4,6 +4,7 @@ import com.jtzj.agent.core.config.AgentProperties;
 import com.jtzj.agent.core.support.Extraction;
 import com.jtzj.agent.core.support.QaMerge;
 import com.jtzj.agent.core.support.SandboxPaths;
+import com.jtzj.agent.core.support.SourceFiles;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -370,34 +371,7 @@ public class PdfService {
     }
 
     private URI validateUrl(String url, AgentProperties.Pdfs cfg) {
-        if (url == null || url.isBlank()) {
-            throw new IllegalArgumentException("pdf_url 为空");
-        }
-        URI uri = URI.create(url.trim());
-        String scheme = uri.getScheme();
-        if (scheme == null || !(scheme.equalsIgnoreCase("http") || scheme.equalsIgnoreCase("https"))) {
-            throw new IllegalArgumentException("pdf_url 必须是 http/https，收到：" + url);
-        }
-        List<String> allow = cfg.getSsrfAllowlist();
-        if (allow != null && !allow.isEmpty()) {
-            String host = uri.getHost();
-            if (host == null) {
-                throw new IllegalArgumentException("无法解析主机名：" + url);
-            }
-            String h = host.toLowerCase();
-            boolean ok = false;
-            for (String entry : allow) {
-                String e = entry == null ? "" : entry.trim().toLowerCase();
-                if (!e.isEmpty() && (h.equals(e) || h.endsWith("." + e))) {
-                    ok = true;
-                    break;
-                }
-            }
-            if (!ok) {
-                throw new IllegalArgumentException("主机不在允许的白名单内：" + host);
-            }
-        }
-        return uri;
+        return SourceFiles.validateUrl(url, cfg.getSsrfAllowlist());
     }
 
     /**

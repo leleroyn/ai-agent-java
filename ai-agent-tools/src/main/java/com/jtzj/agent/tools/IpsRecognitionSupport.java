@@ -29,9 +29,9 @@ final class IpsRecognitionSupport {
     private IpsRecognitionSupport() {
     }
 
-    /** 拿到文件字节后调具体接口（印章或发票）。 */
+    /** 拿到本地文件后调具体接口（印章或发票）。传路径不传字节：上传侧流式读。 */
     interface Call {
-        String invoke(byte[] fileBytes, String filename, boolean returnOcrText, Double initConfidence);
+        String invoke(Path file, String filename, boolean returnOcrText, Double initConfidence);
     }
 
     /** 单个来源的结果：{@code error} 与 {@code raw}（接口响应原文）二者其一。 */
@@ -48,13 +48,14 @@ final class IpsRecognitionSupport {
         List<Outcome> outcomes = new ArrayList<>(refs.size());
         int maxBytes = props.getPdfs().getMaxDownloadBytes();
         for (String ref : refs) {
-            SourceFiles.Fetched fetched = SourceFiles.fetch(ref, taskDir, tempDir, maxBytes);
+            SourceFiles.Fetched fetched = SourceFiles.fetch(
+                    ref, taskDir, tempDir, maxBytes, props.getPdfs().getSsrfAllowlist());
             if (!fetched.ok()) {
                 outcomes.add(new Outcome(ref, fetched.error(), null));
                 continue;
             }
             try {
-                String raw = call.invoke(Files.readAllBytes(fetched.file()),
+                String raw = call.invoke(fetched.file(),
                         filenameOf(ref), returnOcrText, initConfidence);
                 if (raw.startsWith("Error:")) {
                     outcomes.add(new Outcome(ref, raw, null));

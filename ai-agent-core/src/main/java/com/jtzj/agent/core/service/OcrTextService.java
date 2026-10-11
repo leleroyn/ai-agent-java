@@ -7,6 +7,7 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
@@ -45,6 +46,12 @@ public class OcrTextService {
     private static final Logger log = LoggerFactory.getLogger(OcrTextService.class);
     /** OCR 文本与临时页图的去向：仍在任务沙箱内，整次任务跑完后由 {@code AgentTaskRunner} 清掉。 */
     public static final String SCRATCH_DIR = ".ocr";
+
+    /**
+     * 有页 OCR 失败时产物的名字后缀。完整性判断就写在文件名里：
+     * 复用只认没有这个后缀的文件，残缺结果永远不会被当成全文。
+     */
+    public static final String PARTIAL_SUFFIX = "-partial";
     /** PDF 页数超过该值才开并发（1-2 页串行更省一次握手）。 */
     private static final int PARALLEL_ABOVE_PAGES = 2;
 
@@ -73,7 +80,7 @@ public class OcrTextService {
         Path scratch = null;
         try {
             scratch = scratchDir(taskDir);
-            SourceFiles.Fetched fetched = SourceFiles.fetch(source, taskDir, scratch, maxBytes);
+            SourceFiles.Fetched fetched = SourceFiles.fetch(source, taskDir, scratch, maxBytes, props.getPdfs().getSsrfAllowlist());
             if (!fetched.ok()) {
                 return fetched.error();
             }
@@ -84,16 +91,27 @@ public class OcrTextService {
                 }
                 // 文件名带内容哈希：同一份内容（不管从 URL 还是本地副本进来）只会 OCR 一次。
                 String hash = SourceFiles.sha256(file);
-                Path out = scratch.resolve(baseName(source) + "-" + hash.substring(0, 12) + ".txt");
+                String stem = baseName(source) + "-" + hash.substring(0, 12);
+                Path out = scratch.resolve(stem + ".txt");
+                Path partialOut = scratch.resolve(stem + PARTIAL_SUFFIX + ".txt");
                 if (Files.isRegularFile(out) && Files.size(out) > 0) {
                     log.info("reuse txt {} for source {} (same content, sha256={})",
                             out, source, hash.substring(0, 12));
                     return SCRATCH_DIR + "/" + out.getFileName();
                 }
+                // 上一次的残缺结果不复用：宁可重跑一遍 OCR，也不能让一页瞬时失败永久吃掉那几页的字段。
+                Files.deleteIfExists(partialOut);
                 String error = isPdf(file)
-                ? ocrPdfPerPage(file, out, source, scratch)
+                ? ocrPdfPerPage(file, out, partialOut, source, scratch)
                 : ocrWholeFile(file, out, source);
-                return error == null ? SCRATCH_DIR + "/" + out.getFileName() : error;
+                if (error != null) {
+                    return error;
+                }
+                Path produced = Files.exists(out) ? out : partialOut;
+                if (!Files.exists(produced)) {
+                    return "Error: OCR 已完成但没有产出文本。";
+                }
+                return SCRATCH_DIR + "/" + produced.getFileName();
             } finally {
                 if (fetched.temp()) {
                     try {
@@ -127,10 +145,12 @@ public class OcrTextService {
 
     /**
      * PDF：按 {@code agent.pdf.pages-per-call} 分批栅格化，每批内 OCR（页数 &gt; 2 时 2 并发），
-     * 一批识别完再按页号顺序追加写入同一个 txt。单页失败只记录、继续；全部失败才报错。
+     * 一批识别完再按页号顺序追加写入同一个 txt。单页失败写一行显式缺口标记并继续；
+     * 全部失败才报错。有失败页时产物改名带 {@link #PARTIAL_SUFFIX}，下次调用不复用、重跑。
     */
     /** @return 失败原因；{@code null} 表示成功 */
-    private String ocrPdfPerPage(Path pdf, Path out, String source, Path scratch) throws Exception {
+    private String ocrPdfPerPage(Path pdf, Path out, Path partialOut, String source, Path scratch)
+            throws Exception {
         int total = pdfService.pageCount(pdf);
         int maxPages = props.getPdfs().getMaxPages();
         int limit = Math.min(total, Math.max(1, maxPages));
@@ -151,6 +171,7 @@ public class OcrTextService {
                 } catch (Exception e) {
                     log.warn("rasterize pages {}-{} failed: {}", a, b, e.toString());
                     for (int p = a; p <= b; p++) {
+                        w.write(missingPage(p));
                         failed.add(p);
                     }
                     continue;
@@ -161,6 +182,7 @@ public class OcrTextService {
                     String text = texts[i];
                     if (text == null || text.startsWith("Error:")) {
                         log.warn("ocr page {} failed: {}", page, text);
+                        w.write(missingPage(page));
                         failed.add(page);
                         continue;
                     }
@@ -190,9 +212,19 @@ public class OcrTextService {
             return "Error: PDF 共 " + limit + " 页，逐页 OCR 全部失败"
             + (failed.isEmpty() ? "" : "（失败页 " + failed + "）") + "。";
         }
+        if (!failed.isEmpty()) {
+            // 残缺产物换名落盘：复用判断只认完整名，下次调用会重跑，瞬时故障可恢复。
+            Files.move(out, partialOut, StandardCopyOption.REPLACE_EXISTING);
+        }
         log.info("ocr->txt pdf src={} pages={}/{} failed={} chars={} parallel={} file={} elapsed={}ms",
-        source, ok, limit, failed, chars, parallel, out, System.currentTimeMillis() - started);
+        source, ok, limit, failed, chars, parallel,
+        failed.isEmpty() ? out : partialOut, System.currentTimeMillis() - started);
         return null;
+    }
+
+    /** 失败页在 txt 里留一行显式缺口，抽取侧和主模型都能看到「这几页没内容」。 */
+    private static String missingPage(int page) {
+        return "--- 第 " + page + " 页 OCR 失败（该页内容缺失）---\n";
     }
 
     /**

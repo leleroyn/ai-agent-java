@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.jtzj.agent.core.config.AgentProperties;
 import com.jtzj.agent.core.service.IpsClient;
 import com.jtzj.agent.core.service.OcrTextService;
+import com.jtzj.agent.core.support.CallLedger;
 import io.agentscope.core.message.ToolResultBlock;
 import io.agentscope.core.tool.Tool;
 import io.agentscope.core.tool.ToolParam;
@@ -30,6 +31,9 @@ public class SealRecognitionTools {
 
     private static final Logger log = LoggerFactory.getLogger(SealRecognitionTools.class);
 
+    private static final String TOOL = "recognize_seal";
+    private static final int MAX_CALLS_PER_TOOL = 4;
+
     private final IpsClient ips;
     private final AgentProperties props;
     private final ObjectMapper mapper;
@@ -49,8 +53,9 @@ public class SealRecognitionTools {
                     + "输入图片或 PDF，来源可以是 http(s) URL 或本任务工作目录内的路径（可多个，空格/换行分隔）；"
                     + "URL 由工具自己下载，禁止先用 shell 下载成本地文件。"
                     + "返回每枚印章的置信度、类型和印章上的公司名；PDF 会逐页检测。"
-                    + "同一份内容在一次任务里只调一次接口，重复调用只会拿到同一份结果，不要用它做二次确认。"
-                    + "每个来源调用一次就够了，返回的就是权威结果；重复调用只会重新识别一遍，更慢且不会更准。"
+                    + "本工具自带幂等：同一组参数在一次任务里只真跑一次，重复调用直接返回上次结果（不重复打接口）；"
+                    + "一次任务最多真跑 " + MAX_CALLS_PER_TOOL + " 次，超了直接拒绝。"
+                    + "每个来源调用一次就够了，返回的就是权威结果，不要用它做二次确认。"
                     + "返回 {status, results:[{source, seals:[{confidence, seal_type, company}]}]}；"
                     + "seal_type 1=圆形红色章、2=圆形灰色章；seals=[] 表示未检出印章（不是错误，不要换工具再查）。"
                     + "company 只读出局部字样时属正常现象，以已读到的部分为准，不要改用视觉工具重猜。",
@@ -77,12 +82,28 @@ public class SealRecognitionTools {
 
     private String recognize(String source, Boolean returnOcrText, Double initConfidence) {
         if (!ips.isEnabled()) {
-            return "Error: 印章识别通道未启用（agent.ips.enabled=false，或 agent.ips.base-url 与 agent.ocr.base-url 都没配）。";
+            return "Error: 印章识别通道未启用（agent.ips.enabled=false 或未配 agent.ips.base-url）。";
         }
         boolean ocrText = returnOcrText == null || returnOcrText;
+        String key = CallLedger.key(TOOL, CallLedger.normalizeSources(source),
+                String.valueOf(ocrText),
+                initConfidence == null ? "" : String.valueOf(initConfidence));
+        CallLedger ledger = CallLedger.load(taskDir);
+        String cached = ledger.cached(key);
+        if (cached != null) {
+            log.info("recognize_seal idempotent hit key={} already_run={}", key, ledger.toolCalls(TOOL));
+            return cached;
+        }
+        int used = ledger.toolCalls(TOOL);
+        if (used >= MAX_CALLS_PER_TOOL) {
+            log.warn("recognize_seal refused after {} calls in this task", used);
+            return "Error: recognize_seal 在本次任务里已真跑 " + used
+                    + " 次，同一份内容再识别一遍结论不会变。seals=[] 就是权威结论，"
+                    + "请用已有结果作答，不要再换阈值、换来源或换工具重试。";
+        }
         List<IpsRecognitionSupport.Outcome> outcomes = IpsRecognitionSupport.callAll(
                 source, taskDir, taskDir.resolve(OcrTextService.SCRATCH_DIR), props,
-                (bytes, filename, ocr, conf) -> ips.seal(bytes, filename, ocr, conf),
+                (file, filename, ocr, conf) -> ips.seal(file, filename, ocr, conf),
                 ocrText, initConfidence);
         if (outcomes.isEmpty()) {
             return "Error: 未提供任何来源（URL 或本任务目录下的文件路径）。";
@@ -125,6 +146,7 @@ public class SealRecognitionTools {
         env.put("seal_count", seals);
         log.info("recognize_seal sources={} ok={} seals={} return_ocr_text={}",
                 outcomes.size(), ok, seals, ocrText);
+        ledger.record(key, TOOL, env.toString(), ok > 0);
         return env.toString();
     }
 
