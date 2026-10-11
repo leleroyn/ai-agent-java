@@ -26,6 +26,8 @@ public class TaskRecord {
     private String callbackStatus;
     /** Timestamp of the last callback attempt. */
     private Instant callbackAt;
+    /** 调用方是否在请求里同步等结果；队列认领时同步任务优先。 */
+    private Boolean syncRequested;
 
     private String resultJson;
     private String resultText;
@@ -130,6 +132,14 @@ public class TaskRecord {
 
     public void setCallbackStatus(String callbackStatus) {
         this.callbackStatus = callbackStatus;
+    }
+
+    public Boolean getSyncRequested() {
+        return syncRequested;
+    }
+
+    public void setSyncRequested(Boolean syncRequested) {
+        this.syncRequested = syncRequested;
     }
 
     public Instant getCallbackAt() {

@@ -20,12 +20,20 @@ public class AgentProperties {
     private String defaultModel = "flash";
     private final Vision vision = new Vision();
     private final Pdfs pdfs = new Pdfs();
-    private final Ocr ocr = new Ocr();
+    private final Ips ips = new Ips();
     private final Runner runner = new Runner();
     private final Execution execution = new Execution();
     private final Tools tools = new Tools();
     private final Skills skills = new Skills();
     private final Limits limits = new Limits();
+
+    /**
+     * 纯文本子调用（{@code extract_document_fields} / {@code understand_document} 的文本分支）
+     * 用的模型 profile 名，对应 {@code agent.models.*}。OCR 之后手上只剩文本，用文本模型比
+     * 复用视觉端点更准（实测同一份营业执照 OCR 文本：视觉端点 6 字段稳定漏 1 个，pro 全对）。
+     * 留空或 profile 不存在 = 回退视觉端点（旧行为）。
+     */
+    private String textModel = "pro";
 
     public Map<String, Model> getModels() {
         return models;
@@ -53,6 +61,22 @@ public class AgentProperties {
         return m;
     }
 
+    public String getTextModel() {
+        return textModel;
+    }
+
+    public void setTextModel(String textModel) {
+        this.textModel = textModel;
+    }
+
+    /** 纯文本子调用该用哪个模型 profile；未配置或名字未知返回 null（=继续用视觉端点）。 */
+    public Model resolveTextModel() {
+        if (textModel == null || textModel.isBlank()) {
+            return null;
+        }
+        return models.get(textModel.trim());
+    }
+
     public Vision getVision() {
         return vision;
     }
@@ -60,9 +84,8 @@ public class AgentProperties {
     public Pdfs getPdfs() {
         return pdfs;
     }
-
-    public Ocr getOcr() {
-        return ocr;
+    public Ips getIps() {
+        return ips;
     }
 
     public Runner getRunner() {
@@ -780,6 +803,12 @@ public class AgentProperties {
          */
         private int ocrParallelism = 2;
         /**
+         * {@code understand_document} 分批理解 PDF 时的并发批数。批与批并发跑，但结果严格按批序
+         * 归并（{@code QaMerge}），所以并发不影响输出顺序。串行时 72 页要 24 次 VL 调用，必然撞
+         * 600s 预算；2 并发把它压到 ~100s。
+         */
+        private int understandParallelism = 2;
+        /**
          * 抽取类任务最多 OCR 多少页（成本兜底）。超过则只识别前 N 页，并在 txt 末尾写明
          * 「共 X 页，只识别了前 N 页」，抽取结果只覆盖已识别的部分。
          */
@@ -835,6 +864,14 @@ public class AgentProperties {
 
         public void setOcrParallelism(int ocrParallelism) {
             this.ocrParallelism = Math.max(1, ocrParallelism);
+        }
+
+        public int getUnderstandParallelism() {
+            return understandParallelism;
+        }
+
+        public void setUnderstandParallelism(int understandParallelism) {
+            this.understandParallelism = Math.max(1, understandParallelism);
         }
 
         public int getMaxPages() {
@@ -901,38 +938,46 @@ public class AgentProperties {
             this.textChunkOverlap = Math.max(0, textChunkOverlap);
         }
     }
+
     /**
-     * OCR 服务（综合服务平台 /api/v3/ocr/preprocess）配置：需要 OCR 的 PDF 页的加速通道。
+     * 综合服务平台（IPS）统一配置：OCR / 印章 / 发票三个接口同一台服务、同一个基址。
      *
-     * <p>{@code PdfService} 把含图片的页（扫描件、插图页）与文字层几乎没有中日韩文字的页（假文字层）逐页送 OCR，
-     * 其余页直接取 pdftotext 的文字层；之后的字段抽取与问答只发文本，比逐批喂视觉模型快得多。
-     * OCR 未启用或不可用时自动回退视觉通道。
+     * <ul>
+     *   <li>{@code POST /api/v3/ocr/preprocess}      文字识别——抽取类任务的统一文本通道</li>
+     *   <li>{@code POST /api/v3/seal/preprocess}     印章识别——内置工具 {@code recognize_seal}</li>
+     *   <li>{@code POST /api/v3/invoice/preprocess}  发票识别——内置工具 {@code recognize_invoice}</li>
+     * </ul>
+     *
+     * <p>三者共用 {@code baseUrl} 与 {@code enabled}；分开的是各自超时，以及 OCR 特有的
+     * 栅格化参数与表单参数。之前 OCR 单独一个 {@code agent.ocr} 配置块，等于把同一台服务
+     * 配两遍，印章/发票还得再猜一次地址。
      */
-    public static class Ocr {
+    public static class Ips {
         private boolean enabled = true;
-        /** OCR 服务基址（不带路径）；留空=不启用 OCR 通道，PDF 一律走视觉模型。 */
+        /** 服务基址（不带路径）；留空=三个接口全部不可用。 */
         private String baseUrl = "http://127.0.0.1:8000";
-        /** OCR 并发请求数（一页一请求，页码才准）。 */
-        private int concurrency = 4;
-        /** 单次 OCR 请求超时（秒）。 */
-        private int timeoutSeconds = 120;
+        /** 印章/发票单次请求超时（秒）：PDF 逐页检测、发票内部还走大模型，比 OCR 慢。 */
+        private int timeoutSeconds = 180;
+
+        /** OCR 单次请求超时（秒）。一页一请求，这个值直接决定扫描件的时间上限。 */
+        private int ocrTimeoutSeconds = 120;
         /** OCR 栅格化 dpi（0=用 pdftoppm 默认）。OCR 需要比视觉通道更高的分辨率。 */
         private int rasterizeDpi = 300;
         /** OCR 栅格化最长边像素上限（控上传体积）；0=不缩放（OCR 要保分辨率）。pdftoppm -scale-to。 */
         private int maxImageDimension = 0;
         /** OCR 栅格化 JPEG 质量。 */
         private int jpegQuality = 90;
-        /** 表单字段 resize：服务端是否缩放图像（true 更快）。 */
+        /** OCR 表单字段 resize：服务端是否缩放图像（true 更快）。 */
         private boolean resize = true;
-        /** 表单字段 use_cls：服务端是否跑方向检测模型（true 更慢）。 */
+        /** OCR 表单字段 use_cls：服务端是否跑方向检测模型（true 更慢）。 */
         private boolean useCls = false;
         /**
-         * 表单字段 format：{@code txt}=OpenOCR（快，但会丢字段标签——实测营业执照的「注册资本」标签
-         * 在 txt 结果里整个消失，只剩裸数值）；{@code md}=走 vLLM（单页慢约 4 倍，但保留标签与版面，
-         * 抽取召回明显更好）。默认 md。
+         * OCR 表单字段 format：{@code txt}=OpenOCR（快约 4 倍，但会丢字段标签——实测营业执照的
+         * 「注册资本」标签在 txt 结果里整个消失，只剩裸数值）；{@code md}=走 vLLM（单页慢，
+         * 但保留标签与版面，抽取召回明显更好）。默认 md。
          */
         private String format = "md";
-        /** 表单字段 app_id：渠道标识，便于服务端统计；留空不下发。 */
+        /** OCR 表单字段 app_id：渠道标识，便于服务端统计；留空不下发。 */
         private String appId = "ai-agent-java";
 
         public boolean isEnabled() {
@@ -951,14 +996,6 @@ public class AgentProperties {
             this.baseUrl = baseUrl;
         }
 
-        public int getConcurrency() {
-            return concurrency;
-        }
-
-        public void setConcurrency(int concurrency) {
-            this.concurrency = Math.max(1, concurrency);
-        }
-
         public int getTimeoutSeconds() {
             return timeoutSeconds;
         }
@@ -967,12 +1004,20 @@ public class AgentProperties {
             this.timeoutSeconds = Math.max(5, timeoutSeconds);
         }
 
+        public int getOcrTimeoutSeconds() {
+            return ocrTimeoutSeconds;
+        }
+
+        public void setOcrTimeoutSeconds(int ocrTimeoutSeconds) {
+            this.ocrTimeoutSeconds = Math.max(5, ocrTimeoutSeconds);
+        }
+
         public int getRasterizeDpi() {
             return rasterizeDpi;
         }
 
         public void setRasterizeDpi(int rasterizeDpi) {
-            this.rasterizeDpi = Math.max(0, rasterizeDpi);
+            this.rasterizeDpi = rasterizeDpi;
         }
 
         public int getMaxImageDimension() {
@@ -980,7 +1025,7 @@ public class AgentProperties {
         }
 
         public void setMaxImageDimension(int maxImageDimension) {
-            this.maxImageDimension = Math.max(0, maxImageDimension);
+            this.maxImageDimension = maxImageDimension;
         }
 
         public int getJpegQuality() {
@@ -988,7 +1033,7 @@ public class AgentProperties {
         }
 
         public void setJpegQuality(int jpegQuality) {
-            this.jpegQuality = Math.min(100, Math.max(1, jpegQuality));
+            this.jpegQuality = jpegQuality;
         }
 
         public boolean isResize() {

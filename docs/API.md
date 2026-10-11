@@ -31,7 +31,7 @@
 | code | 含义 | 出现的接口 | 调用方该怎么做 |
 |---|---|---|---|
 | `0` | 成功 | 全部 | 读 `data` |
-| `1001` | 请求不合法：字段为空/超长、taskId 格式非法、技能名不存在、model profile 不存在、JSON 解析失败 | `POST /task` | 修正请求后重发，**勿原样重试** |
+| `1001` | 请求不合法：字段为空/超长、taskId 格式非法、model profile 不存在、JSON 解析失败 | `POST /task` | 修正请求后重发，**勿原样重试** |
 | `1002` | 接口不存在（路径无对应处理器，如已下线或拼错的接口；伴随 HTTP 404） | 任意 | 检查请求路径 |
 | `2001` | 任务不存在 | `GET /task/{id}`、`DELETE /task/{id}` | 检查 taskId |
 | `2002` | 任务已是终态，无法取消 | `DELETE /task/{id}` | 无需处理，`message` 会给出当前状态 |
@@ -70,6 +70,10 @@ accepted ────────────────► running ───�
 
 队列存于 MySQL（`agent_task` 表），不在内存里：进程重启后 `accepted` 任务会被重新领取，执行中被中断的任务在租约到期后也会自动重跑。
 
+认领顺序不是纯 FIFO：`options.sync=true` 的任务排在普通任务前面（`sync_requested DESC, created_at ASC`），因为调用方正阻塞在 HTTP 里等结果，异步批量任务多等一轮无感。同一优先级内仍按提交先后。
+
+老库升级需手动执行 `db/migration-005-sync-priority.sql`（新增 `sync_requested` 列），新装由 `schema.sql` 直接带上。
+
 ---
 
 ## 3. 提交任务
@@ -81,7 +85,7 @@ accepted ────────────────► running ───�
 | `instruction` | string | 是 | 自然语言指令，≤ 32768 字符 |
 | `taskId` | string | 否 | 幂等键，缺省由服务端生成。必须匹配 `[A-Za-z0-9][A-Za-z0-9._+-]{0,63}`，不得含路径分隔符（它会作为工作目录名） |
 | `outputSchema` | object | 否 | JSON Schema。提供则强制返回符合该 schema 的 JSON 到 `data.result`；不提供则自由文本放 `data.resultText` |
-| `skills` | string[] | 否 | 指定启用的技能名（见 `GET /skills`，大小写敏感）。不提供＝所有已安装技能可见；提供则这些技能正文被直接注入并强制生效。≤ 8 个 |
+| `skills` | string[] | 否 | 指定启用的技能名（见 `GET /skills`，大小写敏感）。不提供＝所有已安装技能可见；提供则这些技能正文被直接注入并强制生效。未安装的名字被忽略并记 WARN（不报错）。≤ 8 个 |
 | `model` | string | 否 | 主模型 profile（`flash` / `pro`，具体端点由部署配置）。不提供＝用默认（`agent.default-model`，当前 `flash`）；填未知 profile 名返回 `code=1001`，不静默回落。 |
 | `options.sync` | boolean | 否 | true＝阻塞等到终态；false（默认）＝立即返回，由调用方轮询 |
 | `options.timeoutSeconds` | int | 否 | 执行预算，默认 120，上限 900。**从 worker 领取任务时开始计时，不含排队** |
@@ -215,9 +219,6 @@ curl -X POST http://localhost:8080/api/v1/agent/task \
 
 // JSON 不合法 / 非 UTF-8
 { "code": 1001, "message": "request body must be valid JSON" }
-
-// 技能名不存在（会列出可用技能）
-{ "code": 1001, "message": "unknown skill(s) [nope]; available: [report-format]" }
 
 // 队列积压超阈值
 { "code": 3001, "message": "queue depth exceeds agent.execution.max-queued-tasks (1000)" }
@@ -422,9 +423,9 @@ UPDATE agent_task SET callback_status='pending'
 
 `GET /tools`
 
-返回**本项目自定义的工具**（不含框架内置的 shell / 读写文件 / 列目录 / todo），反映 `agent.tools.*` 的实时开关。运维用它确认自定义能力（系统时间 + 文档理解与抽取）是否开启。
+返回**本项目自定义的工具**（不含框架内置的 shell / 读写文件 / 列目录 / todo），反映 `agent.tools.*` 的实时开关。运维用它确认自定义能力（系统时间 + 文档理解与抽取 + 印章/发票识别）是否开启。
 
-默认开关全开时，返回 3 个自定义工具：
+默认开关全开时，返回 5 个自定义工具：
 
 ```json
 {
@@ -432,6 +433,8 @@ UPDATE agent_task SET callback_status='pending'
   "data": [
     { "name": "extract_document_fields", "description": "文档结构化字段抽取（图片/PDF/TXT）……" },
     { "name": "get_system_time", "description": "获取服务器当前日期和时间……" },
+    { "name": "recognize_invoice", "description": "发票识别（专用接口，返回结构化发票字段）……" },
+    { "name": "recognize_seal", "description": "印章识别（专用接口，返回置信度/类型/公司名）……" },
     { "name": "understand_document", "description": "文档自由理解/问答（图片/PDF/TXT）……" }
   ]
 }
@@ -440,8 +443,8 @@ UPDATE agent_task SET callback_status='pending'
 说明：
 
 - `name` 是模型调用时用的工具名，`description` 是用途说明——两者都取自**真正装配出来的工具 schema**，与运行时完全一致，不是另写的一份清单。
-- 只列自定义工具：`get_system_time`、`understand_document`、`extract_document_fields`。框架内置的 `execute_shell_command`/`view_text_file`/`write_text_file`/`insert_text_file`/`list_directory`/`todo_write` **不在此列**。
-- 列表随 `agent.tools.*` 开关变化：关掉某个开关（如 `AGENT_TOOL_DOCUMENT_EXTRACT=false`），对应自定义工具就不再出现；两个文档开关全关时返回空数组。
+- 只列自定义工具：`get_system_time`、`understand_document`、`extract_document_fields`、`recognize_seal`、`recognize_invoice`。框架内置的 `execute_shell_command`/`view_text_file`/`write_text_file`/`insert_text_file`/`list_directory`/`todo_write` **不在此列**。
+- 列表随 `agent.tools.*` 开关变化：关掉某个开关（如 `AGENT_TOOL_DOCUMENT_EXTRACT=false`、`AGENT_TOOL_SEAL_RECOGNITION=false`），对应自定义工具就不再出现；全部关掉时返回空数组。
 
 ### 6.1 `extract_document_fields` 的返回口径
 
@@ -456,17 +459,34 @@ UPDATE agent_task SET callback_status='pending'
 ```
 
 - **每个请求的字段都恰好出现一条**；文档里确实没有时 `value` 是 JSON `null`、`units` 是空数组。这是服务端写死的口径，不是模型措辞——下游按 `value === null` 判缺失，不要匹配「未提及」这类文案。
+- 有 `value=null` 且没有失败单元时，返回值额外带 `null_note`：全文已遍历、已按语义匹配过别名，**null 就是终局结论**。服务端同时拦住重复抽取——同一来源在一次任务里最多抽 3 次，超过直接拒绝、不重跑（实测模型会为一个 null 字段换 8 个字段名把同一来源抽 14 遍，2 页扫描件白跑 188s）。抽取类任务调一次即结束，**不得**用 `understand_document` 补 null 字段。
 - `units` 含义：单个来源时＝文本块序号（按字符切块，不是页码）；多个来源时＝来源序号（按 `source` 里的顺序，从 1 起）。
 - 同一字段抽到多个不同值时**不会**摊成多条互斥结果：`value` 是权威值（非占位符优先 → 出现次数多优先 → 首次出现更早优先），其余候选放进 `alternates`，各带自己的 `units`。这样下游不必再猜哪条算数、也不必换工具自查。
 - 抽取器自己补出来的、未被请求的字段进 `extra`，不与 `results` 混在一起。
 - `status`：`complete`＝所有单元都成功；`partial`＝有单元失败，失败单元在 `failed_units`。
 - 抽取管线只有一条：图片/PDF 先 OCR 成文本（PDF 逐页识别、按页追加到 `.ocr/` 下的同名 `.txt`，每页前有 `--- 第 N 页 ---`），再按字符切块抽取。没有页型探测，也没有视觉/OCR 双通道回退。
 - OCR 原文只出现在任务目录的 `.ocr/` 子目录里：工具返回值不含该路径，全文也不常驻内存（按块读）。它在**整次任务内保留**，任务跑完由服务端删掉整个 `.ocr/`，原文不留盘。
-- 一次任务内同一来源只 OCR 一次：txt 路径按来源缓存，换一批字段再调用直接复用已识别的文本（不缓存的话，模型先抽 5 个字段再补抽 1 个就会把 72 页重新识别一遍）。同样的「来源 + 字段」还有一层结果缓存，重复调用返回同一份结果。
+- 一次任务内同一份内容只 OCR 一次：txt 文件名带内容的 SHA-256 前缀，文件已存在就直接复用（模型先抽 5 个字段再补抽 1 个时不会把 72 页重新识别一遍）。按来源字符串去重做不到这点——模型自己 `curl -o` 出来的本地副本和原 URL 是两个 key。**没有内存缓存**：工具实例不保存全文或结果副本，几十 MB 的扫描件文本不压在堆上。
 - 藏进子目录本身拦不住模型（`list_directory` 不过滤点开头目录，`view_text_file` 也不校验后缀），所以隔离靠不注册读文件的工具，见下一条。
 - 想彻底断掉「模型换工具自查」，就把内置文件工具关掉：`AGENT_TOOL_READ=false`（同时去掉 `view_text_file` 和 `list_directory`）、必要时 `AGENT_TOOL_SHELL=false`。框架的权限规则只能按工具名 deny，做不到按路径，所以路径级隔离只能靠不注册工具。
 - OCR 文本通道**只用于字段抽取**。`understand_document` 对 PDF 始终走视觉，因为 OCR 文本会丢掉版面与图形信息。
+- `understand_document` **不暴露页范围**：PDF 按 `min(agent.pdfs.pages-per-call, agent.vision.max-images)` 页一批，服务端遍历全部页、每批问同一个问题，再用 `agent.text-model` 把各批归并成**一段**回答（批与批并发，`agent.pdfs.understand-parallelism` 默认 2，归并仍严格按批序）；图片来源超过 `max-images` 同样自动分批。TXT 超过一个文本块也一样分批归并。失败批次会在回答末尾列出，不会静默丢页——早先"超过单次上限就返回一段文案让模型自己用 `page_range` 分批"的做法已删掉，它把遍历全文的责任推给了模型，实测模型会为一个问题连开 5 次不同页范围。
 - **文档类指令必须真的读文件**：指令里点名了文档文件（`http(s)` URL 带 pdf/jpg/png/txt/… 后缀）、但整趟运行一个工具都没调时，服务端会带「必须先调工具」的硬约束重试一次；仍不调工具就 `status=failed` + `error.code=NO_RESULT`，绝不把模型凭记忆编出来的字段值当结果返回。要退回「只告警不拦截」，设 `AGENT_FORCE_DOCUMENT_TOOL=false`。
+
+### 6.2 `recognize_seal` / `recognize_invoice` 的返回口径
+
+这两个是**专用识别接口**的内置工具（综合服务平台 `/api/v3/seal/preprocess`、`/api/v3/invoice/preprocess`），取代早先技能里的 curl 示例。
+
+共同点：
+
+- `source` 直接吃 `http(s)` URL 或任务目录内的路径，可多个（空格/换行分隔）；**下载在工具内部完成**，模型不需要也不应该先 `curl -o` 落盘。
+- 返回 `{status, results:[{source, ...}]}`，`status` = `ok` / `partial` / `error`；单个来源失败只影响它自己，原因在该来源的 `error` 里。
+- 返回值只含结构化结论，**不含图片 base64**（印章裁剪图固定不取），也不做内存缓存：每个来源调一次就够。
+- 服务地址：`agent.ips.base-url`——OCR / 印章 / 发票是同一台服务的三个接口，一个基址管三个。
+
+`recognize_seal` → `results[].seals[] = {confidence, seal_type, company}`（`seal_type` 1=圆形红章、2=圆形灰章；`company` 即接口 `ocr_result`），另有 `seal_count`。`seals=[]` 表示未检出印章，是权威结论而非错误。
+
+`recognize_invoice` → `results[] = {confidence, fields}`。接口的 `ocr_text` 本来是个 JSON 字符串，工具已解成 `fields` 对象（key 就是 `发票号码`/`购货方公司名称`/`发票总金额` 这些接口口径名，不要改名）；解不开才退回 `fields_raw`。检测不到有效发票时该来源返回 `error`（附接口给的纯文本原因）。
 
 ---
 
@@ -575,9 +595,10 @@ done
 ## 11. 使用注意
 
 1. **判断任务成败只看 `data.status`**，`code` 只表示这次调用本身成功与否。
-2. **超时不含排队**：`timeoutSeconds` 从 worker 领取任务时开始计时。排队时长看 `startedAt - createdAt`，`durationMs` 是纯执行耗时。高积压下任务总耗时可能远超 `timeoutSeconds`；`sync=true` 的等待从提交时刻算，会把排队也算进去。
+2. **超时不含排队**：`timeoutSeconds` 从 worker 领取任务时开始计时。排队时长看 `startedAt - createdAt`，`durationMs` 是纯执行耗时。高积压下任务总耗时可能远超 `timeoutSeconds`；`sync=true` 的等待从提交时刻算，会把排队也算进去。因此 `sync=true` 的任务在队列里会被**优先认领**，不会被前面的大批量任务压住；但它前面若已有任务在跑，仍要等该任务结束（单 worker 时尤其明显）。
 3. **重试提交是安全的**：同一 `taskId` 重发不会重复执行，而是返回该任务的当前状态或已有结果，`code` 仍为 0。
 4. **`error.retryable=true` 才值得重试任务**（例如 `AGENT_TIMEOUT`、`AGENT_INTERRUPTED`），用同一个 `taskId` 重发即可。
 5. **进程重启不丢任务**：排队中的任务会被重新领取；执行中的任务在租约过期（默认 90 秒）后自动重跑，最多 `max-attempts` 次，超过则置 `failed` + `AGENT_LEASE_EXPIRED`。副作用：有外部写操作的任务可能被执行多次。
 6. **每任务独立工作目录** `<working-dir>/<taskId>`：shell 与文件工具都被限制在该目录内，跨任务读取被拒绝。要让 agent 处理文件，先把文件放进去。
+   `AGENT_DELETE_WORKSPACE_ON_FINISH=true` 时该目录在任务终态后整个删除（磁盘不再累积扫描件产物，代价是事后没法进目录查产物做归因）；默认 `false` 保留目录做审计，只删里面的 OCR 中间文本 `<taskDir>/.ocr`——原文不允许留盘，也不允许跨任务被读到。
 7. **无鉴权**：见文首警告。

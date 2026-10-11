@@ -2,7 +2,9 @@
 
 服务启动时扫描这里，对应配置 `agent.skills.directory`（环境变量 `AGENT_SKILLS_DIR`）。
 
-**入库约定**：本目录平时是**部署产物**（各环境的 skill 由运维拷入，不提交，此处默认只保留本说明）。例外：需要跨环境保留的**环境特定 skill**（如 `seal-recognition`，绑定具体接口）可按需提交进版本库。通用的、可复用的示例 skill 模板放 `docs/examples/skills/`（已入库）。
+**入库约定**：本目录平时是**部署产物**（各环境的 skill 由运维拷入，不提交，此处默认只保留本说明）。通用的、可复用的示例 skill 模板放 `docs/examples/skills/`（已入库）。
+
+> 印章 / 发票**不是技能**：它们是内置工具 `recognize_seal` / `recognize_invoice`，参数与返回口径写在工具描述里，调用方在 instruction 里直接点名工具即可。早先的两个 SKILL.md 已删除——技能正文会逼模型先 `curl -o` 下载文件，同一份内容出现两个身份，去重失效（实测把 72 页重新 OCR 一遍）。
 
 ## 放法
 

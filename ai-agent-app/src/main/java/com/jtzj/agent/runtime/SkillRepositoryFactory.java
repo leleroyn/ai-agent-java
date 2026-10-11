@@ -98,11 +98,13 @@ public class SkillRepositoryFactory {
     /**
      * Validate a request's selection against the allowlist and what is actually installed.
      *
-     * <p>Unknown names are rejected rather than ignored: a silently empty skill view would let
-     * the agent answer confidently without the guidance the caller thought it asked for.
+     * <p>Unknown names are dropped with a WARN rather than rejected. They used to be a 400, which
+     * turned into a hard outage for callers that still send a skill name the deployment stopped
+     * shipping: seal/invoice guidance now lives in the {@code recognize_seal} / {@code
+     * recognize_invoice} tool descriptions, so a stale name costs nothing but a log line.
      *
-     * @return the normalised, de-duplicated selection (never null)
-     * @throws AgentException INVALID_REQUEST on bad shape, unknown names, or over-length lists
+     * @return the normalised, de-duplicated selection of names that are actually installed
+     * @throws AgentException INVALID_REQUEST on bad shape or an over-length list
      */
     public List<String> validateSelection(List<String> requested) {
         if (requested == null || requested.isEmpty()) {
@@ -146,9 +148,9 @@ public class SkillRepositoryFactory {
             }
         }
         if (!unknown.isEmpty()) {
-            throw new AgentException(ErrorCodes.INVALID_REQUEST,
-                    "unknown skill(s) " + unknown + "; available: "
-                            + (installed.isEmpty() ? "(none installed)" : installed), false);
+            log.warn("ignoring unknown skill(s) {} (available: {})", unknown,
+                    installed.isEmpty() ? "(none installed)" : installed);
+            cleaned.removeAll(unknown);
         }
         return cleaned;
     }

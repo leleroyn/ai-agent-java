@@ -122,6 +122,8 @@ public class AgentTaskService {
         // Persisted so a task claimed after a restart still runs on the same model profile.
         candidate.setModelName(modelName);
         candidate.setCallbackUrl(normalizeCallbackUrl(request.callbackUrl()));
+        // 认领排序用：sync=true 的调用方正阻塞等结果，队列里排在普通任务前面。
+        candidate.setSyncRequested(request.syncRequested());
         candidate.setCreatedAt(Instant.now());
 
         boolean created = store.insertIfAbsent(candidate);

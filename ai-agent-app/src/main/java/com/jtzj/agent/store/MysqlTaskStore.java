@@ -37,7 +37,7 @@ public class MysqlTaskStore implements TaskStore {
 
     private static final String COLUMNS = """
             task_id, status, instruction, output_schema, business_meta, timeout_seconds, skill_names, model_name,
-            callback_url, callback_status, callback_at,
+            sync_requested, callback_url, callback_status, callback_at,
             result_json, result_text, error_code, error_message, retryable,
             input_tokens, output_tokens, total_tokens, duration_ms, attempt,
             created_at, started_at, completed_at, updated_at
@@ -60,6 +60,8 @@ public class MysqlTaskStore implements TaskStore {
         r.setAttempt(readInt(rs, "attempt"));
         r.setSkillNames(rs.getString("skill_names"));
         r.setModelName(rs.getString("model_name"));
+        boolean syncRequested = rs.getBoolean("sync_requested");
+        r.setSyncRequested(rs.wasNull() ? null : syncRequested);
         r.setCallbackUrl(rs.getString("callback_url"));
         r.setCallbackStatus(rs.getString("callback_status"));
         Timestamp cbAt = rs.getTimestamp("callback_at");
@@ -105,8 +107,8 @@ public class MysqlTaskStore implements TaskStore {
         String sql = """
                 INSERT IGNORE INTO agent_task (
                     task_id, status, instruction, output_schema, business_meta, timeout_seconds,
-                    skill_names, model_name, callback_url, retryable, attempt, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
+                    skill_names, model_name, sync_requested, callback_url, retryable, attempt, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
                 """;
         Instant now = r.getCreatedAt() == null ? Instant.now() : r.getCreatedAt();
         try {
@@ -119,6 +121,7 @@ public class MysqlTaskStore implements TaskStore {
                     r.getTimeoutSeconds(),
                     r.getSkillNames(),
                     r.getModelName(),
+                    r.getSyncRequested() != null && r.getSyncRequested() ? 1 : 0,
                     r.getCallbackUrl(),
                     ts(now),
                     ts(now));
@@ -139,8 +142,9 @@ public class MysqlTaskStore implements TaskStore {
     @Override
     public Optional<TaskRecord> claimNext(String workerId, Duration lease, int peekLimit) {
         List<String> candidates = jdbc.queryForList(
+                // 同步请求优先：调用方正阻塞在 HTTP 里等，异步批量任务多等一轮无感。
                 "SELECT task_id FROM agent_task WHERE status = 'accepted'"
-                        + " ORDER BY created_at ASC, task_id ASC LIMIT ?",
+                        + " ORDER BY sync_requested DESC, created_at ASC, task_id ASC LIMIT ?",
                 String.class, Math.max(1, peekLimit));
         if (candidates.isEmpty()) {
             return Optional.empty();

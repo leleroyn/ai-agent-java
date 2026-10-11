@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS agent_task (
     timeout_seconds INT         NOT NULL DEFAULT 120 COMMENT 'clamped per-task budget; must survive a restart',
     skill_names      VARCHAR(512) NULL   COMMENT 'comma-separated selected skill names; NULL = all installed skills',
     model_name       VARCHAR(64)  NULL   COMMENT 'main-model profile for this task (flash|pro); NULL = default at run time',
+    sync_requested   TINYINT(1)    NOT NULL DEFAULT 0 COMMENT '调用方同步等待结果：认领时优先于普通任务',
     callback_url     VARCHAR(1024) NULL  COMMENT '任务完成后通知地址；NULL=不通知',
     callback_status  VARCHAR(16)  NULL   COMMENT '回调投递结果：NULL=未配置, success, failed',
     callback_at      DATETIME(3)  NULL   COMMENT '最后一次回调时间',

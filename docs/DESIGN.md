@@ -12,7 +12,7 @@
 核心设计取向：
 - **框架内调用**：AgentScope 是 JVM 内 Java 库，无子进程、无临时文件、无文件轮询。
 - **图片/文档与主模型解耦**：图像字节、PDF 栅格化页图只发到独立的视觉模型（`agent.vision`），**永不进入主模型上下文**；主模型只拿文字结果。
-- **扫描页走 OCR 换文本**：PDF 里含图片的页（扫描件、插图页）与文字层几乎没有中日韩文字的页（缺 ToUnicode 的假文字层）逐页送 OCR（`agent.ocr`）换文本，
+- **扫描页走 OCR 换文本**：PDF 里含图片的页（扫描件、插图页）与文字层几乎没有中日韩文字的页（缺 ToUnicode 的假文字层）逐页送 OCR（`agent.ips`）换文本，
   其余页直接取 `pdftotext` 文字层，之后的抽取/问答只发文本；OCR 未启用或连不上才回退视觉模型。
 - **双模型档位**：`flash`（默认）/ `pro`，按任务 `model` 字段选用；两套完全独立配置。
 - **工具自注册**：自定义工具通过 SPI 贡献，加/改工具只动一个模块（见 §4）。
@@ -40,7 +40,7 @@ AgentTaskRunner → ReActAgent.call(msgs, schemaNode, ctx)
    └─ StructuredOutputConverter       按 profile 的 structured-output-mode 产出合规 JSON
    ▼
 自定义工具 → VisionClient（图片）/ PdfService（PDF）→ agent.vision 视觉模型
-                                    └─ PdfService 需要 OCR 的页 → OcrClient → agent.ocr OCR 服务（换文本后仍走纯文本抽取）
+                                    └─ PdfService 需要 OCR 的页 → IpsClient → agent.ips（OCR 接口）（换文本后仍走纯文本抽取）
 ```
 
 结构化输出走两条路径之一（由 profile 的 `structured-output-mode` 决定：`auto|native|tool|two_phase|off`）：模型原生 `response_format`，或注入合成工具产出。
@@ -61,19 +61,24 @@ ai-agent-java/                         Maven 父工程 (packaging=pom, groupId c
 │       ├── config/    AgentProperties        @ConfigurationProperties("agent")
 │       ├── model/     AgentTaskRequest · TaskRecord · TaskStatus · TaskStatusView · TaskError · TaskUsage
 │       ├── service/   VisionClient           独立视觉模型客户端（图片/扫描页字节只发到 agent.vision）
-│       │              OcrClient             独立 OCR 服务客户端（multipart 上传页图，只回文本）
-│       │              PdfService             整篇遍历 + 分批并发结构化抽取 + 确定性归并 + 页码溯源
+│       │              IpsClient             独立 OCR 服务客户端（multipart 上传页图，只回文本）
+│       │              OcrTextService         图片/PDF → 同名 .txt（PDF 逐页按页序追加；txt 名带内容哈希）
+│       │              IpsClient              印章/发票专用接口客户端（multipart，只回 JSON）
+│       │              PdfService             整篇遍历 + 分批并发结构化抽取 + 确定性归并 + 页码溯源；理解类分批问全文再归并成一段
 │       │                                   需要 OCR 的页走 OCR 文本通道，其余页取文字层
-│       ├── support/   MediaInputs · Extraction · SandboxPaths     入参解析 / 抽取归并 / 沙箱路径校验
+│       ├── support/   MediaInputs · Extraction · SandboxPaths · SourceFiles
+│       │                                   入参解析 / 抽取归并 / 沙箱路径校验 / 来源落地（URL 下载 + 内容哈希）
 │       ├── error/     AgentException · ErrorCodes
 │       └── spi/       AgentToolProvider · ToolContext             工具自注册接口
 │
 ├── ai-agent-tools/                ★  【自定义工具】加/改工具只动这里；只依赖 core + agentscope
 │   └── src/main/java/com/jtzj/agent/tools/    （每个工具类 + 同名 Provider，Provider 是 @Component）
-│       ├── SystemTimeTools          + SystemTimeToolProvider          (get_system_time)
 │       ├── DocumentUnderstandTools  + DocumentUnderstandToolProvider  (understand_document)
 │       ├── DocumentExtractTools     + DocumentExtractToolProvider     (extract_document_fields)
-│       └── SystemTimeToolProvider                                    (get_system_time)
+│       ├── SealRecognitionTools     + SealRecognitionToolProvider     (recognize_seal)
+│       ├── InvoiceRecognitionTools  + InvoiceRecognitionToolProvider  (recognize_invoice)
+│       └── SystemTimeTools          + SystemTimeToolProvider          (get_system_time)
+│       （共用管线：IpsRecognitionSupport —— 来源落地 + 逐来源调用 + 按来源汇总）
 │
 ├── ai-agent-app/                    【Spring Boot 主应用】依赖 tools + core；启动时收集所有 provider
 │   ├── pom.xml                      spring-boot-maven-plugin 在此；finalName=ai-agent-java-<ver>
@@ -85,9 +90,9 @@ ai-agent-java/                         Maven 父工程 (packaging=pom, groupId c
 │   │   ├── service/    AgentTaskService · TaskPoller
 │   │   ├── store/      MysqlTaskStore · TaskStore
 │   │   └── config/     Jackson2Config（agentScopeObjectMapper，Jackson 2）
-│   └── src/main/resources/  application.yml · db/{schema,migration-001..003}.sql
+│   └── src/main/resources/  application.yml · db/{schema,migration-001..005}.sql
 │
-├── agent-skills/                    运行期技能挂载点（部署产物；seal/invoice 两个环境特例已入库）
+├── agent-skills/                    运行期技能挂载点（部署产物，默认只 README）
 ├── docs/  API.md · DEPLOY.md · DESIGN.md · examples/
 └── scripts/  build.sh · docker-build*.sh · docker-run.sh · run-local.sh · deploy-remote.sh(本地,gitignore)
 ```
@@ -149,7 +154,7 @@ ai-agent-java/                         Maven 父工程 (packaging=pom, groupId c
   "instruction": "逐张抽取发票字段……\n<url1>\n<url2>",
   "model": "pro",                          // 可选，选 agent.models 档位；未知档位 → 1001
   "outputSchema": { "type":"object", "properties": { "...": {} } },
-  "skills": ["invoice-recognition"],       // 可选，点名技能（服务端强制注入正文）
+  "skills": ["report-format"],             // 可选，点名技能（服务端强制注入正文）
   "options": { "timeoutSeconds": 180, "sync": false },
   "metadata": { "projectId": "..." }
 }
@@ -176,11 +181,12 @@ ai-agent-java/                         Maven 父工程 (packaging=pom, groupId c
 | `agent.default-model` | 默认档位（`flash`） |
 | `agent.models.<flash\|pro>` | **两套完全独立**：`base-url` `api-key` `name` `max-tokens` `temperature` `context-window-size` `structured-output-mode` `reasoning-effort` `native-structured-output` `native-structured-output-with-tools` `strata-checkpoint` |
 | `agent.vision` | 独立视觉模型：`base-url` `api-key` `name` `temperature` `reasoning-effort` `max-tokens` `max-images` `max-image-bytes` `timeout-seconds` |
+| `agent.text-model` | 抽取/QA 的纯文本子调用用的 profile 名（`agent.models.*`），默认 `pro`；留空=回退视觉端点 |
 | `agent.runner` | `name` `sys-prompt` `max-iters` `permission-mode`(默认 `BYPASS`) |
 | `agent.execution` | `max-concurrent`(4) `default-timeout-seconds`(120) `max-timeout-seconds`(900) `lease-seconds`(90) `lease-reap-seconds`(30) `max-attempts`(2) `poll-interval-ms` `claim-peek` `max-queued-tasks`(1000) |
 | `agent.tools.*` | 自定义工具按 provider 名开关（默认开）+ 框架内置 `shell/read-file/write-file/todo` + `working-dir` `shell-allowed-commands` `delete-workspace-on-finish` |
-| `agent.pdfs` | `enabled` `pages-per-call` `concurrency` `max-pages` `max-image-dimension` `jpeg-quality` `timeout-seconds` `max-download-bytes` `text-chunk-size` `text-chunk-overlap` `ssrf-allowlist` |
-| `agent.ocr` | OCR 服务（含图片的 PDF 页换文本）：`enabled` `base-url` `concurrency` `timeout-seconds` `rasterize-dpi` `max-image-dimension` `jpeg-quality` `resize` `use-cls` `format` `app-id` |
+| `agent.pdfs` | `enabled` `pages-per-call` `concurrency` `ocr-parallelism` `understand-parallelism` `max-pages` `max-image-dimension` `jpeg-quality` `timeout-seconds` `max-download-bytes` `text-chunk-size` `text-chunk-overlap` `ssrf-allowlist` |
+| `agent.ips` | 综合服务平台三个接口（OCR / 印章 / 发票）：`enabled` `base-url` `timeout-seconds`（印章/发票） `ocr-timeout-seconds` `rasterize-dpi` `max-image-dimension` `jpeg-quality` `resize` `use-cls` `format` `app-id` |
 | `agent.skills` | `enabled` `directory` `classpath-location` `code-execution-enabled` `max-requested` `max-inline-chars` |
 
 数据源：`serverTimezone=Asia/Shanghai`（见 §5 时间说明）。
@@ -191,7 +197,7 @@ ai-agent-java/                         Maven 父工程 (packaging=pom, groupId c
 
 - **并发=worker 线程数**：`max-concurrent` 个线程，每线程同时跑 1 个任务，直接从 `agent_task` claim，不存在内存队列。
 - **入队**：`INSERT status=accepted` 即完成入队。
-- **抢占**：MySQL 5.7 无 `FOR UPDATE SKIP LOCKED`。改为「SELECT 候选 id → `UPDATE … WHERE task_id=? AND status='accepted'`」，靠 InnoDB 行锁保证只有一个 worker `affected=1`。
+- **抢占**：MySQL 5.7 无 `FOR UPDATE SKIP LOCKED`。改为「SELECT 候选 id → `UPDATE … WHERE task_id=? AND status='accepted'`」，靠 InnoDB 行锁保证只有一个 worker `affected=1`。候选排序 `sync_requested DESC, created_at ASC, task_id ASC`：同步请求优先认领，其余按提交先后，保证公平。
 - **租约/心跳**：claim 写 `lease_expires_at`（`lease-seconds`，默认 90s），执行期续租；进程被杀后租约过期，reaper（`lease-reap-seconds`）把 `running` 退回 `accepted` 重跑；累计 claim 达 `max-attempts`（默认 2）则 `failed`。租约过期比较走 Java 传参（`lease_expires_at < ?`），与时区无关。
 - **背压**：队列深度超 `max-queued-tasks` 时新提交返回 `3001 QUEUE_LIMITED` 并回滚该行。
 - **整体超时**：任务级 `timeoutSeconds`（默认 `default-timeout-seconds`，上限 `max-timeout-seconds`）→ `AGENT_TIMEOUT`。
@@ -204,7 +210,7 @@ ai-agent-java/                         Maven 父工程 (packaging=pom, groupId c
 - **硬化手段**：收紧 `agent.tools.*`（关 shell/写文件）、把 `permission-mode` 调到 `EXPLORE`/更严格、配 `shell-allowed-commands` 白名单、`delete-workspace-on-finish` 控制产物留存。
 - **本地文件入参**：`SandboxPaths` 严格限制在任务沙箱内，越界拒绝；本地源文件不删除。
 - **鉴权**：本服务**不含鉴权**（API Key/mTLS 由上游网关负责，接口对外前必须前置鉴权）。
-- **注入面**：`outputSchema`/`skills` 会进 prompt，提交时校验（技能名白名单正则、数量与注入字符上限、未知技能直接拒绝而非静默忽略）。
+- **注入面**：`outputSchema`/`skills` 会进 prompt，提交时校验（技能名白名单正则、数量与注入字符上限；未安装的技能名忽略并记 WARN，不报错）。
 
 ---
 
@@ -216,11 +222,17 @@ AgentScope 2.0.3 自带 `io.agentscope.core.skill`，格式与 Claude/pi skills 
 
 **两级来源（低→高，后者同名覆盖前者）**：jar 内置（`classpath-location`，缺目录静默跳过）+ 运维目录（`agent.skills.directory`，只读，按 SKILL.md 的 mtime/size 快照，**改文件不需重启**）。
 
-**两种生效方式（关键取舍）**：请求带 `skills:[...]` → 服务端把技能正文直接注入任务提示、强制生效（点名=必须遵循，交模型自选是概率性的）；不带则只暴露 name/description，模型按需 `load_skill_through_path`。提交时校验技能名/数量/注入字符上限，未知技能直接拒绝并回列可用清单。
+**两种生效方式（关键取舍）**：请求带 `skills:[...]` → 服务端把技能正文直接注入任务提示、强制生效（点名=必须遵循，交模型自选是概率性的）；不带则只暴露 name/description，模型按需 `load_skill_through_path`。提交时校验技能名/数量/注入字符上限；未安装的技能名忽略并记 WARN（历史上是 400，会让还在传旧技能名的调用方直接失败）。
 
 **成本**：装了技能时即使请求不用，`<available_skills>` 元数据也会增加每次请求 input（实测 2 个技能约 +600 token；空目录不注入空块）。显式点名的技能正文另计。彻底关掉：`AGENT_SKILLS_ENABLED=false`。
 
-**目录分工**：`docs/examples/skills/` 是可运行示例；`agent-skills/` 是运维挂载点（默认只 README，内容属部署产物不入库——**例外**：`seal-recognition`、`invoice-recognition` 两个环境特例技能已刻意入库）。
+**目录分工**：`docs/examples/skills/` 是可运行示例；`agent-skills/` 是运维挂载点（默认只 README，内容属部署产物不入库）。
+
+**抽取即终局（为什么禁止用 `understand_document` 补 null 字段）**：抽取子模型每次都遍历全部文本块并按语义匹配别名（`TextService` 的提示词），所以「换个字段名再抽一遍」和「用视觉补一处」都必然同解。早先 sys-prompt 里「字段 null 时可以用 understand_document 补这一处」是一条**授权**，模型据此把 2 页扫描件跑成 14 次抽取 + 6 次视觉（188s，字段其实全对）。现在三处一起收口：返回值里带 `null_note` 说明 null 即终局；sys-prompt 改成「抽取类任务调一次抽取工具就结束，绝不用 understand_document 补字段」；`DocumentExtractTools.Attempts` 按来源计数（`.ocr/extracted.json`，只存计数不存正文）超过 3 次直接拒绝。
+
+**纯文本子调用不用视觉端点（`agent.text-model`）**：图片/PDF 一旦 OCR 成 txt，抽取和 QA 手上就只剩文本，此时调的是 `agent.vision` 那个 VL 模型，纯属将就。实测同一份营业执照的 OCR 文本（680 字符、单块、`temperature=0`）：字段列表给 6 个时稳定漏掉 `成立日期`（文本里明写 `成立日期 1989年09月09日`），只给 3 个就正常；同一提示词换成文本模型 `pro` 则 6/6 全对。所以 `askTextOnly` 默认改走 `agent.text-model`（默认 `pro`），只有真带图的请求才去视觉端点。
+
+**印章/发票为什么不再是「curl 技能」**：这两个接口只吃 multipart 文件、不吃 URL，技能里的 curl 示例会逼模型先 `curl -o` 把文件下载进工作目录，于是同一份内容出现「URL」和「本地副本」两个身份（按来源做的去重必然失效），模型还会把没拿到值的印章字段丢回 `extract_document_fields` 去补——实测为 1 个字段把 72 页重新 OCR 一遍、87s 后撞超时。现在调用与下载都在内置工具 `recognize_seal` / `recognize_invoice` 里，参数、返回结构、字段别名和「什么算权威结论」全部写进工具描述，两个 SKILL.md 已删除——调用方在 instruction 里直接点名工具即可。
 
 ---
 

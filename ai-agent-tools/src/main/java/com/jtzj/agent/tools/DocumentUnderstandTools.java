@@ -4,6 +4,7 @@ import com.jtzj.agent.core.config.AgentProperties;
 import com.jtzj.agent.core.service.PdfService;
 import com.jtzj.agent.core.service.TextService;
 import com.jtzj.agent.core.service.VisionClient;
+import com.jtzj.agent.core.support.QaMerge;
 import com.jtzj.agent.core.support.MediaInputs;
 import io.agentscope.core.message.ToolResultBlock;
 import io.agentscope.core.tool.Tool;
@@ -39,8 +40,11 @@ public class DocumentUnderstandTools {
             name = "understand_document",
             description = "文档自由理解/问答。支持图片（jpg/png/webp等）、PDF、TXT。"
                     + "用于描述、对比、总结、转录或回答关于文档内容的开放性问题。"
-                    + "多个图片来源在一次调用中一起分析，可跨图对比。"
-                    + "混合类型时分别处理各类型结果拼接，不跨类型对比。返回自然语言文本。",
+                    + "不得用它补 extract_document_fields 返回 null 的字段——null 是终局结论，"
+                    + "抽取类任务调一次抽取工具就结束了。"
+                    + "PDF/TXT 会服务端分批遍历全部内容并归并成一段回答，图片过多也会自动分批归并："
+                    + "不需要、也不要指定页范围，工具自己覆盖全文。"
+                    + "多个图片来源可跨图对比；混合类型时分别处理各类型结果拼接，不跨类型对比。返回自然语言文本。",
             readOnly = true,
             concurrencySafe = true)
     public ToolResultBlock understand(
@@ -54,16 +58,11 @@ public class DocumentUnderstandTools {
                     name = "question",
                     description = "要回答的问题或理解要求，例如\"描述这张图\"\"总结这份文档\"\"这两张图金额是否一致\"。",
                     required = true)
-            String question,
-            @ToolParam(
-                    name = "page_range",
-                    description = "可选，仅对 PDF 有效：\"a-b\"、\"a\"、\"a-\"。留空=处理全部。",
-                    required = false)
-            String pageRange) {
-        return ToolResults.text(understandImpl(source, question, pageRange));
+            String question) {
+        return ToolResults.text(understandImpl(source, question));
     }
 
-    private String understandImpl(String source, String question, String pageRange) {
+    private String understandImpl(String source, String question) {
 
         if (question == null || question.isBlank()) {
             return "Error: question 不能为空，请说明要对文档做什么。";
@@ -92,17 +91,27 @@ public class DocumentUnderstandTools {
         StringBuilder result = new StringBuilder();
 
         if (!images.isEmpty()) {
-            MediaInputs.Result r = MediaInputs.resolveAsDataUrls(
-                    visionClient, taskDir, images, props.getVision().getMaxImages());
-            if (!r.ok()) {
-                return r.error();
+            int max = props.getVision().getMaxImages();
+            List<String> parts = new ArrayList<>();
+            for (int i = 0; i < images.size(); i += max) {
+                int to = Math.min(images.size(), i + max);
+                MediaInputs.Result r = MediaInputs.resolveAsDataUrls(
+                        visionClient, taskDir, images.subList(i, to), max);
+                if (!r.ok()) {
+                    return r.error();
+                }
+                String out = visionClient.extractFromDataUrls(r.dataUrls(), question);
+                if (out.startsWith("Error:")) {
+                    return out;
+                }
+                String label = images.size() > max ? "【第 " + (i + 1) + "-" + to + " 张图】\n" : "";
+                parts.add(label + out.trim());
             }
-            String out = visionClient.extractFromDataUrls(r.dataUrls(), question);
             if (result.length() > 0) result.append('\n');
-            result.append(out);
+            result.append(QaMerge.merge(visionClient, parts, question));
         }
         for (String pdf : pdfs) {
-            String out = pdfService.understand(pdf, question, pageRange, taskDir);
+            String out = pdfService.understand(pdf, question, null, taskDir);
             if (result.length() > 0) result.append('\n');
             result.append(out);
         }

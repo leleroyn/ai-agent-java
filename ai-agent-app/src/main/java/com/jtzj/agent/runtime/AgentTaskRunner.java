@@ -99,7 +99,12 @@ public class AgentTaskRunner {
             return runInWorkspace(taskId, instruction, schema, skills, budget, modelName, taskDir);
         } finally {
             // OCR 中间文本只在本次运行内有意义（同一来源换字段不再重识别）；跑完即删，原文不留盘。
-            workspaceFactory.deleteScratch(taskDir);
+            if (props.getTools().isDeleteWorkspaceOnFinish()) {
+                // 不保留审计：整个任务目录一起清掉，否则每份扫描件都在盘上留几十 MB，只涨不缩。
+                workspaceFactory.delete(taskId);
+            } else {
+                workspaceFactory.deleteScratch(taskDir);
+            }
         }
     }
 

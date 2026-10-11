@@ -12,6 +12,8 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.agentscope.core.message.ToolResultBlock;
 import io.agentscope.core.tool.Tool;
 import io.agentscope.core.tool.ToolParam;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -19,7 +21,6 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeSet;
-import java.util.concurrent.ConcurrentHashMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -31,25 +32,33 @@ import org.slf4j.LoggerFactory;
  * {@link TextService} 按块抽取、确定性归并。只有一条通道、一套失败语义，没有页型探测、
  * 没有视觉/OCR 双通道回退。
  *
- * <p><b>一次任务内同一来源只 OCR 一次</b>：txt 路径按来源缓存，换一批字段再抽直接复用那份文本
- * （实测模型常先抽 5 个字段、再补抽 1 个，不缓存就会把 72 页重新识别一遍）。txt 不进主模型上下文——
+ * <p><b>一次任务内同一份内容只 OCR 一次</b>：换一批字段再抽时，直接复用磁盘上已识别好的那份 txt
+ * （实测模型常先抽 5 个字段、再补抽 1 个，不复用就会把 72 页重新识别一遍）。txt 不进主模型上下文——
  * 返回值里只有归并后的字段值，且部署侧关掉 read-file、shell 只留 curl；整次任务跑完由
  * {@code AgentTaskRunner} 删掉 {@code .ocr/}。
+ *
+ * <p><b>不做内存缓存</b>：去重靠磁盘上那份 txt（{@link OcrTextService} 按内容哈希命名，文件已存在
+ * 就直接复用），工具实例里不留任何全文或结果副本——几十 MB 的扫描件文本不该压在堆上。
+ *
+ * <p><b>重复抽取由次数闸拦住</b>：{@link Attempts} 在 {@code .ocr/extracted.json} 里只记「某个来源被抽了
+ * 几次」。拦的是「同一来源再抽一遍」本身，不是字段名——抽取子模型每次都遍历全部文本块并按语义
+ * 匹配别名，所以换字段名重抽必然同解。实测模型为一个 {@code value=null} 的字段把同一来源抽 14 遍
+ * （乙方电子证书号→电子证书号→出让人→证书号→乙方…），2 页扫描件白跑 188s。
+ * 计数随任务目录删除，工具实例里没有副本；并发调用最坏是两条都放行，不影响正确性。
  * {@code units} = 文本块序号（不是页码——PDF 的 txt 每页前有页标记，但分块按字符切）。
 */
 public class DocumentExtractTools {
 
     private static final Logger log = LoggerFactory.getLogger(DocumentExtractTools.class);
 
+    /** 同一来源在一次任务里最多抽几次：1 次正常抽取 + 2 次余量（OCR 部分失败、字段确实要补）。 */
+    private static final int MAX_EXTRACT_CALLS_PER_SOURCE = 3;
+
     private final OcrTextService ocrTextService;
     private final TextService textService;
     private final AgentProperties props;
     private final ObjectMapper mapper;
     private final Path taskDir;
-    /** 本次运行内同一来源只 OCR 一次：重复调用直接复用已生成的 txt。 */
-    private final Map<String, String> txtCache = new ConcurrentHashMap<>();
-    /** 本次运行内同样的「来源 + 字段」只抽一次：重复调用返回同一份结果，不再跑分块抽取。 */
-    private final Map<String, String> resultCache = new ConcurrentHashMap<>();
 
     public DocumentExtractTools(OcrTextService ocrTextService, TextService textService,
     AgentProperties props, ObjectMapper mapper, Path taskDir) {
@@ -65,8 +74,10 @@ public class DocumentExtractTools {
             description = "文档结构化字段抽取。支持图片（jpg/png/webp等）、PDF、TXT。"
               + "图片与 PDF 会先 OCR 成文本（PDF 逐页识别后按页追加），再按文本块抽取，"
                 + "整篇自动遍历，无需指定页范围。每个请求字段都会出现在结果里（抽不到 value=null）。"
-                  + "同一来源在一次任务里只 OCR 一次，换一批字段再调用会复用已识别的文本。"
-                  + "返回值就是权威结果：同样的来源+字段重复调用只会拿到同一份结果，不要用它做二次确认。"
+                  + "同一份内容在一次任务里只 OCR 一次：第二次调用直接复用已识别好的文本，换一批新字段再抽才有效。"
+                  + "返回值就是权威结果：value=null 表示全文已完整遍历、并按语义匹配过别名仍未出现该字段，"
+                  + "这就是终局结论——不得换个字段名再抽一遍，也不得改用 understand_document 补这个字段。"
+                  + "抽取类任务调本工具一次就够了；同一来源超过抽取次数上限会被直接拒绝（不重跑）。"
                     + "返回 {status, total_units, results:[{field, value, units, alternates?}], extra?, failed_units}。"
                     + "units: 文本块序号（单个来源时）或来源序号（多个来源时）。",
             readOnly = true,
@@ -108,15 +119,8 @@ public class DocumentExtractTools {
                 usable++;
                 continue;
             }
-            String txt = txtCache.get(ref);
-            if (txt == null) {
-                txt = ocrTextService.toTextFile(ref, taskDir);
-                if (!txt.startsWith("Error:")) {
-                    txtCache.put(ref, txt);
-                }
-            } else {
-                log.info("reuse txt {} for source {} (already converted in this run)", txt, ref);
-            }
+            // 去重在 OcrTextService 里按内容做：同一份内容第二次调用直接复用磁盘上已有的 txt，不重 OCR。
+            String txt = ocrTextService.toTextFile(ref, taskDir);
             if (txt.startsWith("Error:")) {
                 failures.add(ref + " -> " + txt);
                 txtOfRef.add(null);
@@ -129,25 +133,33 @@ public class DocumentExtractTools {
             return "Error: 所有来源都无法转成文本：" + String.join(" | ", failures);
         }
 
-        log.info("doc extract sources={} usable={} fields={} ocr_failures={}",
-                refs.size(), usable, fields.size(), failures.size());
-
-        // 2) 同样的来源 + 字段只抽一次：模型重复调用时直接回同一份结果。
-        String cacheKey = String.join("|", refs) + "#" + String.join("|", fields);
-        String cached = resultCache.get(cacheKey);
-        if (cached != null) {
-            log.info("doc extract cache hit sources={} fields={}", refs.size(), fields.size());
-            return cached;
+        // 次数闸：所有可用来源都已到上限 → 结论不会变，直接拒绝，不跑模型。
+        Attempts attempts = Attempts.load(taskDir, mapper);
+        int over = 0;
+        for (String txt : txtOfRef) {
+            if (txt != null && attempts.reached(txt, MAX_EXTRACT_CALLS_PER_SOURCE)) {
+                over++;
+            }
+        }
+        if (over == usable) {
+            log.warn("doc extract refused (every source already extracted {} times) sources={}",
+                    MAX_EXTRACT_CALLS_PER_SOURCE, refs);
+            return "Error: 这些来源在本次任务里已经抽取过 " + MAX_EXTRACT_CALLS_PER_SOURCE
+                    + " 次，再抽一遍结论不会变。value=null 就是终局结论：不要再抽取、不要换字段名重试、"
+                    + "也不要用 understand_document 补这个字段。请用已有结论作答。";
         }
 
-        // 3) 单来源：直接返回分块抽取结果（units=块号）
+        log.info("doc extract sources={} usable={} fields={} ocr_failures={}",
+                refs.size(), usable, fields.size(), failures.size());
+        attempts.bump(txtOfRef);
+
+        // 2) 单来源：直接返回分块抽取结果（units=块号）
         if (refs.size() == 1 && usable == 1) {
             String single = textService.extractFields(txtOfRef.get(0), fieldsRaw, taskDir);
-            remember(cacheKey, single);
             return single;
         }
 
-        // 4) 多来源：逐个抽取后按 (字段,值)->来源序号 归并，保持与单来源相同的返回形状
+        // 3) 多来源：逐个抽取后按 (字段,值)->来源序号 归并，保持与单来源相同的返回形状
         LinkedHashMap<String, LinkedHashMap<String, TreeSet<Integer>>> acc = new LinkedHashMap<>();
         TreeSet<Integer> failedUnits = new TreeSet<>();
         for (int i = 0; i < refs.size(); i++) {
@@ -179,16 +191,7 @@ public class DocumentExtractTools {
             }
         }
         String merged = buildResult(fields, acc, failedUnits, refs.size());
-        remember(cacheKey, merged);
         return merged;
-    }
-
-    /** 只缓存成功结果：同样的来源 + 字段再问一次，直接回同一份。 */
-    private void remember(String cacheKey, String result) {
-        if (result == null || result.startsWith("Error:")) {
-            return;
-        }
-        resultCache.put(cacheKey, result);
     }
 
     /** 归并成统一契约：每个请求字段恰好一条权威 value，其余候选进 alternates。 */
@@ -214,5 +217,69 @@ public class DocumentExtractTools {
 
     private static String textOrNull(JsonNode n) {
         return n == null || n.isMissingNode() || n.isNull() ? null : n.asText();
+    }
+
+    /**
+     * 「某个来源在本次任务里被抽了几次」的计数，落在 {@code .ocr/extracted.json}。
+     *
+     * <p>不是缓存：只存计数，不存正文也不存抽取结果。随任务目录一起删，工具实例里没有副本。
+     */
+    private static final class Attempts {
+
+        private static final String FILE = ".ocr/extracted.json";
+
+        private final Path file;
+        private final ObjectMapper mapper;
+        private final Map<String, Integer> counts;
+
+        private Attempts(Path file, ObjectMapper mapper, Map<String, Integer> counts) {
+            this.file = file;
+            this.mapper = mapper;
+            this.counts = counts;
+        }
+
+        static Attempts load(Path taskDir, ObjectMapper mapper) {
+            Map<String, Integer> counts = new LinkedHashMap<>();
+            Path file = taskDir.resolve(FILE);
+            try {
+                if (Files.isRegularFile(file)) {
+                    JsonNode root = mapper.readTree(Files.readString(file, StandardCharsets.UTF_8));
+                    root.fields().forEachRemaining(e -> {
+                        if (e.getValue().isInt()) {
+                            counts.put(e.getKey(), e.getValue().asInt());
+                        }
+                    });
+                }
+            } catch (Exception e) {
+                log.warn("extract attempts {} unreadable, starting empty: {}", file, e.toString());
+            }
+            return new Attempts(file, mapper, counts);
+        }
+
+        /** 该来源是否已经抽到上限。 */
+        boolean reached(String key, int cap) {
+            return counts.getOrDefault(key, 0) >= cap;
+        }
+
+        void bump(List<String> keys) {
+            boolean changed = false;
+            for (String key : keys) {
+                if (key != null) {
+                    counts.merge(key, 1, Integer::sum);
+                    changed = true;
+                }
+            }
+            if (!changed) {
+                return;
+            }
+            try {
+                Files.createDirectories(file.getParent());
+                ObjectNode root = mapper.createObjectNode();
+                counts.forEach(root::put);
+                Files.writeString(file, mapper.writeValueAsString(root), StandardCharsets.UTF_8);
+            } catch (Exception e) {
+                log.warn("could not write extract attempts {}: {}", file, e.toString());
+            }
+        }
     }
 }

@@ -2,6 +2,7 @@ package com.jtzj.agent.core.service;
 
 import com.jtzj.agent.core.config.AgentProperties;
 import com.jtzj.agent.core.support.Extraction;
+import com.jtzj.agent.core.support.QaMerge;
 import com.jtzj.agent.core.support.SandboxPaths;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -89,40 +90,37 @@ public class PdfService {
             downloaded = isDownloaded(pdfSource);
             int total = pageCount(pdf);
             List<int[]> segments = resolveRanges(pageRange, total);
-            List<Integer> wanted = pagesOf(segments);
-            int pages = wanted.size();
+            int pages = pagesOf(segments).size();
             int cap = effectiveBatch(cfg);
-            log.info("pdf understand src={} total={} range={} pages={} cap={}",
-                    pdfSource, total, describe(segments), pages, cap);
-            if (pages > cap) {
-                List<int[]> first = new ArrayList<>();
-                int budget = cap;
-                for (int[] seg : segments) {
-                    int span = seg[1] - seg[0] + 1;
-                    if (span <= budget) {
-                        first.add(seg);
-                        budget -= span;
-                    } else {
-                        first.add(new int[]{seg[0], seg[0] + budget - 1});
-                        break;
-                    }
-                }
-                return "本文档共 " + total + " 页，本次请求 " + describe(segments) + "（" + pages
-                        + " 页）超过单次上限 " + cap + " 页。要抽取关键字段请用 extract_document_fields"
-                        + "（它会服务端遍历整篇）；若只是问答，请用 page_range 分批，例如先 \""
-                        + describe(first) + "\"，再按需继续，最后汇总。";
-            }
+            List<int[]> batches = batchSegments(segments, cap);
+            log.info("pdf understand src={} total={} pages={} batches={} cap={}",
+                    pdfSource, total, pages, batches.size(), cap);
+
             String q = (question == null || question.isBlank())
                     ? "请逐页转录并说明每一页的文字与主要内容。" : question.trim();
-            List<String> urls = new ArrayList<>();
-            for (int[] seg : segments) {
-                List<String> part = rasterize(pdf, seg[0], seg[1], 0, taskDir);
-                if (part.isEmpty()) {
-                    return "Error: 栅格化第 " + seg[0] + "-" + seg[1] + " 页失败（可能不是有效 PDF）。";
+            List<String> parts = new ArrayList<>();
+            List<String> failed = new ArrayList<>();
+            int parallel = Math.min(Math.max(1, cfg.getUnderstandParallelism()), batches.size());
+            String[] answers = runBatches(pdf, batches, total, q, taskDir, parallel);
+            for (int bi = 0; bi < batches.size(); bi++) {
+                int[] seg = batches.get(bi);
+                String out = answers[bi];
+                if (out == null) {
+                    failed.add(seg[0] + "-" + seg[1]);
+                    continue;
                 }
-                urls.addAll(part);
+                parts.add("【第 " + seg[0] + "-" + seg[1] + " 页】\n" + out);
             }
-            return visionClient.extractFromDataUrls(urls, buildQaPrompt(wanted, total, q));
+            if (parts.isEmpty()) {
+                return "Error: 这份 PDF 的 " + pages + " 页全部没能理解（栅格化或视觉模型失败）。";
+            }
+            String merged = QaMerge.merge(visionClient, parts, q);
+            if (!failed.isEmpty()) {
+                merged += "\n\n（以下页未能理解，结论不覆盖它们：" + String.join("、", failed) + "）";
+            }
+            log.info("pdf understand done src={} pages={} batches={} ok={} failed={} answerChars={}",
+                    pdfSource, pages, batches.size(), parts.size(), failed.size(), merged.length());
+            return merged;
         } catch (Exception e) {
             log.error("pdf understand failed src={}", pdfSource, e);
             return "Error: 处理 PDF 失败：" + e.getClass().getSimpleName() + ": " + e.getMessage();
@@ -172,6 +170,67 @@ public class PdfService {
     }
 
     /** 每批喂视觉模型的页数 = min(pdf.pages-per-call, vision.max-images)，至少 1。 */
+    /**
+     * 分批问视觉模型。批与批并发（{@code agent.pdfs.understand-parallelism}），但返回值按批序放回，
+     * 后面的归并因此与串行时完全一致；失败批返回 {@code null}，由调用方按序归入未覆盖页。
+     */
+    private String[] runBatches(Path pdf, List<int[]> batches, int total, String q, Path taskDir, int parallel) {
+        String[] answers = new String[batches.size()];
+        if (parallel <= 1) {
+            for (int bi = 0; bi < batches.size(); bi++) {
+                answers[bi] = askBatch(pdf, batches.get(bi), bi + 1, batches.size(), total, q, taskDir);
+            }
+            return answers;
+        }
+        ExecutorService exec = Executors.newFixedThreadPool(parallel);
+        try {
+            List<Future<?>> futures = new ArrayList<>(batches.size());
+            for (int bi = 0; bi < batches.size(); bi++) {
+                final int idx = bi;
+                futures.add(exec.submit(() ->
+                        answers[idx] = askBatch(pdf, batches.get(idx), idx + 1, batches.size(), total, q, taskDir)));
+            }
+            for (Future<?> f : futures) {
+                try {
+                    f.get();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                } catch (Exception e) {
+                    log.warn("pdf understand batch task failed: {}", e.toString());
+                }
+            }
+        } finally {
+            exec.shutdownNow();
+        }
+        return answers;
+    }
+
+    /** 单批：栅格化 → 问视觉模型 → 删掉本批页图。失败返回 {@code null}。 */
+    private String askBatch(Path pdf, int[] seg, int batchNo, int batchCount, int total, String q, Path taskDir) {
+        try {
+            List<String> urls = rasterize(pdf, seg[0], seg[1], batchNo, taskDir);
+            if (urls.size() != seg[1] - seg[0] + 1) {
+                log.warn("pdf understand batch {}/{} pages={}-{} rasterized {} of {}",
+                        batchNo, batchCount, seg[0], seg[1], urls.size(), seg[1] - seg[0] + 1);
+                return null;
+            }
+            String out = visionClient.extractFromDataUrls(urls, buildQaPrompt(pagesOf(seg), total, q));
+            if (out.startsWith("Error:")) {
+                log.warn("pdf understand batch {}/{} pages={}-{} failed: {}", batchNo, batchCount, seg[0], seg[1], out);
+                return null;
+            }
+            return out.trim();
+        } catch (Exception e) {
+            log.warn("pdf understand batch {}/{} pages={}-{} error: {}",
+                    batchNo, batchCount, seg[0], seg[1], e.toString());
+            return null;
+        } finally {
+            // 只删本批的页图（文件名前缀带批号），并发下不会碰到别的批。
+            cleanup(taskDir, null, "pg" + batchNo + "-");
+        }
+    }
+
     private int effectiveBatch(AgentProperties.Pdfs cfg) {
         int k = Math.min(cfg.getPagesPerCall(), props.getVision().getMaxImages());
         return Math.max(1, k);
@@ -191,10 +250,10 @@ public class PdfService {
 
     /**
      * OCR 通道用：把第 a-b 页栅格化成 JPEG 字节，按页码顺序返回。
-     * dpi/质量取 {@code agent.ocr} 配置（OCR 需要比视觉更高的 dpi）。
+     * dpi/质量取 {@code agent.ips} 配置（OCR 需要比视觉更高的 dpi）。
      */
     public List<byte[]> renderPageImages(Path pdf, int a, int b, Path taskDir) throws Exception {
-        AgentProperties.Ocr ocr = props.getOcr();
+        AgentProperties.Ips ocr = props.getIps();
         return rasterizeBytes(pdf, a, b, "ocrpg", taskDir,
                 ocr.getRasterizeDpi(), ocr.getMaxImageDimension(), ocr.getJpegQuality());
     }
@@ -347,6 +406,17 @@ public class PdfService {
      * a-b 解析，{@code Integer.parseInt("5 70-72")} 直接抛 NumberFormatException，白烧一轮调用。
      * 重叠或相邻的段会合并，避免同一页栅格化两次。
      */
+    /** 把页段按单次上限切成连续小段：栅格化按 -f/-l 取页，段内必须页码连续。 */
+    private static List<int[]> batchSegments(List<int[]> segments, int cap) {
+        List<int[]> out = new ArrayList<>();
+        for (int[] seg : segments) {
+            for (int a = seg[0]; a <= seg[1]; a += cap) {
+                out.add(new int[]{a, Math.min(seg[1], a + cap - 1)});
+            }
+        }
+        return out;
+    }
+
     private static List<int[]> resolveRanges(String pageRange, int total) {
         if (pageRange == null || pageRange.isBlank()) {
             return List.of(new int[]{1, total});
@@ -404,6 +474,10 @@ public class PdfService {
     }
 
     /** 段集合展开成页号列表。 */
+    private static List<Integer> pagesOf(int[] seg) {
+        return pagesOf(List.of(seg));
+    }
+
     private static List<Integer> pagesOf(List<int[]> segments) {
         List<Integer> pages = new ArrayList<>();
         for (int[] seg : segments) {
@@ -438,12 +512,17 @@ public class PdfService {
 
     /** 清理临时页图；{@code alsoDelete} 非空则一并删该下载来的源文件（本地来源传 null 不删源文件）。 */
     private void cleanup(Path taskDir, String alsoDelete) {
+        cleanup(taskDir, alsoDelete, "pg");
+    }
+
+    /** {@code prefix} 决定删哪批页图：{@code pg} 全删，{@code pg3-} 只删第 3 批（带连字符，避免 pg1 误删 pg12）。 */
+    private void cleanup(Path taskDir, String alsoDelete, String prefix) {
         try {
             if (taskDir != null && Files.isDirectory(taskDir)) {
                 try (var stream = Files.list(taskDir)) {
                     stream.filter(p -> {
                         String n = p.getFileName().toString();
-                        return n.startsWith("pg") && n.toLowerCase().endsWith(".jpg");
+                        return n.startsWith(prefix) && n.toLowerCase().endsWith(".jpg");
                     }).forEach(p -> {
                         try {
                             Files.deleteIfExists(p);

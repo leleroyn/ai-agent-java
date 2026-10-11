@@ -32,6 +32,10 @@ agent:
   # 主模型 profile：task 可通过请求里的 model 字段选一个；未指定用 default-model。
   # 两个 profile 完全独立、无共享属性，各自自由设定。未知 profile 名会在提交时拒绝。
   default-model: ${AGENT_DEFAULT_MODEL:flash}
+  # 抽取/QA 的纯文本子调用用哪个 profile（agent.models.*）。OCR 之后手上只剩文本，
+  # 用文本模型明显更准：同一份营业执照 OCR 文本，视觉端点 6 字段稳定漏 1 个，pro 全对。
+  # 留空=回退视觉端点（旧行为）。
+  text-model: ${AGENT_TEXT_MODEL:pro}
   models:
     # flash：小快模型（llama.cpp :8007，minicpm）。实测 n_ctx=8192、total_slots=1（串行），
     # 只适合短上下文、简单任务；复杂/多图/长文档任务应用 pro。
@@ -96,14 +100,15 @@ agent:
       - 任务是"找特定信息"时优先用 extract_document_fields。
       - 每个目标只调一次工具，第一次返回即权威，不得重复调用确认。
       - extract_document_fields 的 value 就是权威结论：同一字段只会给一条 value，其余候选在 alternates 里，以 value 为准，不要自己挑。
-      - 只有当某字段返回 value=null、而指令确实要这个值时，才用 understand_document 补这一处；已经拿到值的字段不要再查一遍。
+      - 抽取类任务调一次 extract_document_fields 就结束了：value=null 表示全文已遍历、已按语义匹配过别名，
+        这就是终局结论。绝对禁止为了补 null 字段去调 understand_document，也禁止换个字段名再抽一遍。
+      - 印章只用 recognize_seal、发票只用 recognize_invoice，这两个工具的返回就是权威结论；
+        不得用 extract_document_fields 或 understand_document 去补印章/发票字段，也不得因为没检出就换工具再查。
+      - 文档类工具都能直接吃 http(s) URL：绝对禁止先用 shell 把文件下载成本地文件再传路径，
+        同一份内容出现两个身份会让已识别的文本被重跑一遍。
       - 涉及日期/时间必须调 get_system_time，禁止凭记忆推断。
       - 信息够了就输出结果并停止。
-      - 指令或技能要求 JSON/结构化输出时，最终答案只输出 JSON 本身：不加解释、不加前后缀、不用 Markdown 代码围栏。
-      技能：
-      - 任务文本已包含技能内容时直接遵循，不再调 load_skill_through_path。
-      - <available_skills> 中有匹配项时必须先 load_skill_through_path，然后严格遵循其输出要求。
-      - 匹配的技能是强制性的，不是参考。先加载技能再写最终答案。
+      - 指令要求 JSON/结构化输出时，最终答案只输出 JSON 本身：不加解释、不加前后缀、不用 Markdown 代码围栏。
     max-iters: ${AGENT_MAX_ITERS:20}
     # 指令里点名了文档文件、但整趟运行一个工具都没调 —— 答案只可能来自模型记忆（实测营业执照
     # 任务 1.6s 返回了另一家公司的字段）。默认重试一次，仍不调工具就失败，绝不把编造值当结果。
@@ -135,7 +140,7 @@ agent:
     # Backpressure: refuse new submissions beyond this many still-queued tasks. 0 disables.
     max-queued-tasks: ${AGENT_MAX_QUEUED_TASKS:1000}
 
-  # PDF：需要 OCR 的页（含图片的页，或文字层几乎没有中日韩文字的页）走 OCR 文本通道（见 agent.ocr），其余页取文字层；OCR 不可用时回退视觉模型。
+  # PDF：需要 OCR 的页（含图片的页，或文字层几乎没有中日韩文字的页）走 OCR 文本通道（见 agent.ips），其余页取文字层；OCR 不可用时回退视觉模型。
   # TXT：分块纯文本调模型。服务端遍历整篇保召回。
   pdfs:
     enabled: ${AGENT_PDF_ENABLED:true}
@@ -147,6 +152,8 @@ agent:
     # 扫描版 PDF 逐页 OCR 的并发 worker 数；写入仍严格按页序，并发只发生在识别阶段，
     # 页数 <= 2 时始终串行。format=md 单页慢约 4 倍，这里调高可以把 72 页那份的时间补回来。
     ocr-parallelism: ${AGENT_PDF_OCR_PARALLELISM:2}
+    # understand_document 分批理解 PDF 的并发批数；结果仍按批序归并，并发只影响耗时。
+    understand-parallelism: ${AGENT_PDF_UNDERSTAND_PARALLELISM:2}
     # 抽取类任务最多 OCR 多少页（成本兜底）；超过只识别前 N 页，并在 txt 末尾注明共几页。
     max-pages: ${AGENT_PDF_MAX_PAGES:200}
     # 栅格化最长边像素（控 token；0=不缩放）。pdftoppm -scale-to。
@@ -167,30 +174,31 @@ agent:
     # ssrf-allowlist:
     #   - internal.example
 
-  # OCR 服务（综合服务平台 /api/v3/ocr/preprocess）：含图片的页（扫描件、插图页）与文字层几乎没有中日韩文字
-  # 之后的字段抽取/问答只发文本，比把这些页喂视觉模型快得多。base-url 留空=关掉该通道，PDF 一律走视觉。
-  # 注意：一页一请求（服务端按页拼接会丢空白页、页码对不上），并发数由 concurrency 控制。
-  ocr:
-    enabled: ${AGENT_OCR_ENABLED:true}
-    base-url: ${AGENT_OCR_BASE_URL:http://127.0.0.1:8000}
-    # OCR 并发请求数。
-    concurrency: ${AGENT_OCR_CONCURRENCY:4}
-    # 单次 OCR 请求超时（秒）。
-    timeout-seconds: ${AGENT_OCR_TIMEOUT:120}
+  # 综合服务平台（IPS）：OCR / 印章 / 发票三个接口，同一台服务、同一个基址。
+  #   POST /api/v3/ocr/preprocess      抽取类任务的统一文本通道（图片与 PDF 一律先 OCR 换文本）
+  #   POST /api/v3/seal/preprocess     内置工具 recognize_seal（印章）
+  #   POST /api/v3/invoice/preprocess  内置工具 recognize_invoice（发票）
+  # base-url 留空 = 三个能力一起关掉：抽取无法进行，两个识别工具直接报错。
+  # OCR 一页一请求（服务端按页拼接会丢空白页、页码对不上）；PDF 的页级并发在 agent.pdfs.ocr-parallelism。
+  # format：txt=OpenOCR，单页快约 4 倍，但会丢字段标签（实测营业执照的「注册资本」标签在 txt
+  # 里整个消失，只剩裸数值，抽取只能靠猜）；md=走 vLLM，保留标签与版面，抽取召回明显更好。
+  # 默认 md：抽取质量优先，时间用 agent.pdfs.ocr-parallelism 补。
+  ips:
+    enabled: ${AGENT_IPS_ENABLED:true}
+    base-url: ${AGENT_IPS_BASE_URL:http://127.0.0.1:8000}
+    # 印章/发票单次请求超时（秒）：PDF 逐页检测、发票内部还走大模型，比 OCR 慢，给足。
+    timeout-seconds: ${AGENT_IPS_TIMEOUT:180}
+    # ---- OCR 接口 ----
+    ocr-timeout-seconds: ${AGENT_IPS_OCR_TIMEOUT:120}
     # OCR 栅格化 dpi / 最长边像素上限（0=不缩放，保识别分辨率）/ JPEG 质量。
-    rasterize-dpi: ${AGENT_OCR_DPI:300}
-    max-image-dimension: ${AGENT_OCR_MAX_DIM:0}
-    jpeg-quality: ${AGENT_OCR_JPEG_QUALITY:90}
+    rasterize-dpi: ${AGENT_IPS_RASTERIZE_DPI:300}
+    max-image-dimension: ${AGENT_IPS_MAX_DIM:0}
+    jpeg-quality: ${AGENT_IPS_JPEG_QUALITY:90}
     # 表单参数：resize=服务端缩放（快）；use_cls=方向检测（慢）。
-    resize: ${AGENT_OCR_RESIZE:true}
-    use-cls: ${AGENT_OCR_USE_CLS:false}
-    # format：txt=OpenOCR，单页快约 4 倍，但会丢字段标签（实测营业执照的「注册资本」标签在 txt
-    # 里整个消失，只剩裸数值，抽取只能靠猜）；md=走 vLLM，保留标签与版面，抽取召回明显更好。
-    # 默认 md：抽取质量优先，时间用 agent.pdfs.ocr-parallelism 补。
-    format: ${AGENT_OCR_FORMAT:md}
-    # 渠道标识，便于 OCR 服务端统计；留空=不下发。
-    app-id: ${AGENT_OCR_APP_ID:ai-agent-java}
-
+    resize: ${AGENT_IPS_RESIZE:true}
+    use-cls: ${AGENT_IPS_USE_CLS:false}
+    # 渠道标识，便于服务端统计；留空=不下发。
+    app-id: ${AGENT_IPS_APP_ID:ai-agent-java}
   tools:
     # Decision: expose all built-in tools. Requires permission-mode BYPASS.
     shell: ${AGENT_TOOL_SHELL:true}
@@ -206,6 +214,10 @@ agent:
     document-understand: ${AGENT_TOOL_DOCUMENT_UNDERSTAND:true}
     # 自定义工具：extract_document_fields（图片/PDF/TXT 字段抽取）。
     document-extract: ${AGENT_TOOL_DOCUMENT_EXTRACT:true}
+    # 自定义工具：recognize_seal（印章识别，专用接口）。
+    seal-recognition: ${AGENT_TOOL_SEAL_RECOGNITION:true}
+    # 自定义工具：recognize_invoice（发票识别，专用接口）。
+    invoice-recognition: ${AGENT_TOOL_INVOICE_RECOGNITION:true}
 
     # Sandbox root. Each task gets its own private subdirectory <working-dir>/<taskId>,
     # which is what the file tools are actually confined to.

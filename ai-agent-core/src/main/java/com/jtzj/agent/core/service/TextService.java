@@ -2,6 +2,7 @@ package com.jtzj.agent.core.service;
 
 import com.jtzj.agent.core.config.AgentProperties;
 import com.jtzj.agent.core.support.Extraction;
+import com.jtzj.agent.core.support.QaMerge;
 import com.jtzj.agent.core.support.SandboxPaths;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -181,17 +182,26 @@ public class TextService {
             if (totalChunks == 1) {
                 return visionClient.askTextOnly(buildQaPrompt(chunks.get(0), 1, 1, q));
             }
-            // 多块：逐块问答，拼接结果
-            StringBuilder sb = new StringBuilder();
+            // 多块：逐块问答后归并成一段。直接拼接等于把同一个问题答 N 遍，
+            // 还得主模型自己汇总——那是把分批的代价推给调用方。
+            List<String> parts = new ArrayList<>();
+            List<String> failed = new ArrayList<>();
             for (int i = 0; i < totalChunks; i++) {
                 String answer = visionClient.askTextOnly(buildQaPrompt(chunks.get(i), i + 1, totalChunks, q));
                 if (answer.startsWith("Error:")) {
-                    sb.append("[第 ").append(i + 1).append('/').append(totalChunks).append(" 段处理失败]\n");
+                    failed.add("第 " + (i + 1) + "/" + totalChunks + " 段");
                 } else {
-                    sb.append(answer).append('\n');
+                    parts.add("【第 " + (i + 1) + "/" + totalChunks + " 段】\n" + answer.trim());
                 }
             }
-            return sb.toString().trim();
+            if (parts.isEmpty()) {
+                return "Error: 全部 " + totalChunks + " 段都没能理解。";
+            }
+            String merged = QaMerge.merge(visionClient, parts, q);
+            if (!failed.isEmpty()) {
+                merged += "\n\n（未能理解的文本段：" + String.join("、", failed) + "）";
+            }
+            return merged;
         } catch (Exception e) {
             log.error("text understand failed src={}", txtSource, e);
             return "Error: 处理 TXT 失败：" + e.getClass().getSimpleName() + ": " + e.getMessage();

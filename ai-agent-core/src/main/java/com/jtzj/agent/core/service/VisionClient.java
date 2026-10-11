@@ -163,23 +163,45 @@ public class VisionClient {
     }
 
     /**
-     * 纯文本问答（无图片）。用于 TXT 分块抽取等场景。
+     * 纯文本问答（无图片）：抽取 / QA 这类"OCR 之后手上只剩文本"的场景。
+     *
+     * <p>默认走 {@code agent.text-model} 指定的文本模型，不再复用视觉端点——实测同一份营业执照
+     * OCR 文本，视觉端点在 6 字段时稳定漏掉 1 个，文本模型全对。未配置该 profile 时回退视觉端点。
      *
      * <p>发的 content 是数组形式 {@code [{"type":"text","text":"..."}]}（与带图时统一结构）。
      * llama.cpp / vLLM / OpenAI 均支持；若后端只接受纯字符串 content，需在此处分支。
      */
     public String askTextOnly(String prompt) {
+        AgentProperties.Model m = props.resolveTextModel();
+        if (m != null) {
+            return askTextOnly(prompt, m);
+        }
         AgentProperties.Vision v = props.getVision();
         if (!v.isEnabled()) {
             return "Error: 视觉功能未启用（agent.vision.enabled=false）。";
         }
+        return postText("text:" + v.getName(), v.getBaseUrl(), v.getApiKey(), v.getName(),
+                v.getMaxTokens(), v.getTemperature(), v.getReasoningEffort(),
+                v.getTimeoutSeconds(), prompt);
+    }
+
+    /** 纯文本问答，走指定模型 profile（{@code agent.models.*}）。 */
+    public String askTextOnly(String prompt, AgentProperties.Model m) {
+        return postText("text:" + m.getName(), m.getBaseUrl(), m.getApiKey(), m.getName(),
+                m.getMaxTokens(), m.getTemperature(), m.getReasoningEffort(),
+                props.getVision().getTimeoutSeconds(), prompt);
+    }
+
+    /** 纯文本请求的公共实现：建请求、发一次、取 content。{@code label} 只用于日志。 */
+    private String postText(String label, String baseUrl, String apiKey, String model,
+                            Integer maxTokens, Double temperature, String reasoningEffort,
+                            int timeoutSeconds, String prompt) {
         try {
-            byte[] body = buildRequest(v, prompt, List.of());
-            Duration timeout = Duration.ofSeconds(v.getTimeoutSeconds());
-            HttpRequest req = HttpRequest.newBuilder(URI.create(trimSlash(v.getBaseUrl()) + "/chat/completions"))
-                    .timeout(timeout)
+            byte[] body = buildRequest(model, maxTokens, temperature, reasoningEffort, prompt, List.of());
+            HttpRequest req = HttpRequest.newBuilder(URI.create(trimSlash(baseUrl) + "/chat/completions"))
+                    .timeout(Duration.ofSeconds(timeoutSeconds))
                     .header("Content-Type", "application/json")
-                    .header("Authorization", "Bearer " + (v.getApiKey() == null ? "" : v.getApiKey()))
+                    .header("Authorization", "Bearer " + (apiKey == null ? "" : apiKey))
                     .POST(HttpRequest.BodyPublishers.ofByteArray(body))
                     .build();
             long start = System.nanoTime();
@@ -187,18 +209,18 @@ public class VisionClient {
             long ms = (System.nanoTime() - start) / 1_000_000;
             String respBody = new String(resp.body(), StandardCharsets.UTF_8);
             if (resp.statusCode() / 100 != 2) {
-                log.warn("vision(text) HTTP {} in {}ms body={}", resp.statusCode(), ms, snippet(respBody));
-                return "Error: 视觉模型返回 HTTP " + resp.statusCode() + "：" + snippet(respBody);
+                log.warn("{} HTTP {} in {}ms body={}", label, resp.statusCode(), ms, snippet(respBody));
+                return "Error: 模型返回 HTTP " + resp.statusCode() + "：" + snippet(respBody);
             }
             String text = extractContent(respBody);
             if (text == null || text.isBlank()) {
-                return "Error: 视觉模型返回了空内容。";
+                return "Error: 模型返回了空内容。";
             }
-            log.info("vision(text) ok in {}ms chars={}", ms, text.length());
+            log.info("{} ok in {}ms chars={}", label, ms, text.length());
             return text;
         } catch (Exception e) {
-            log.error("vision(text) call failed", e);
-            return "Error: 调用视觉模型失败：" + e.getClass().getSimpleName() + ": " + e.getMessage();
+            log.error("{} call failed", label, e);
+            return "Error: 调用模型失败：" + e.getClass().getSimpleName() + ": " + e.getMessage();
         }
     }
 
@@ -306,18 +328,25 @@ public class VisionClient {
 
     private byte[] buildRequest(AgentProperties.Vision v, String question, List<ImageData> images)
             throws Exception {
+        return buildRequest(v.getName(), v.getMaxTokens(), v.getTemperature(),
+                v.getReasoningEffort(), question, images);
+    }
+
+    private byte[] buildRequest(String model, Integer maxTokens, Double temperature,
+                                String reasoningEffort, String question, List<ImageData> images)
+            throws Exception {
         ObjectNode root = mapper.createObjectNode();
-        root.put("model", v.getName());
-        if (v.getMaxTokens() != null) {
-            root.put("max_tokens", v.getMaxTokens());
+        root.put("model", model);
+        if (maxTokens != null) {
+            root.put("max_tokens", maxTokens);
         }
-        if (v.getTemperature() != null) {
-            root.put("temperature", v.getTemperature());
+        if (temperature != null) {
+            root.put("temperature", temperature);
         }
         // 视觉推理强度：非空则按 OpenAI reasoning_effort 下发；"none" 时额外补
         // chat_template_kwargs.enable_thinking=false——llama.cpp 不认 reasoning_effort，
         // Qwen3 关思考要靠该 kwargs（与主模型 ModelFactory 同一做法）；后端不支持时会被忽略。
-        String effort = v.getReasoningEffort();
+        String effort = reasoningEffort;
         if (effort != null && !effort.isBlank()) {
             root.put("reasoning_effort", effort.trim().toLowerCase(java.util.Locale.ROOT));
             if ("none".equalsIgnoreCase(effort.trim())) {

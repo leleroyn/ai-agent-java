@@ -1,0 +1,2 @@
+#!/bin/bash
+docker run --rm mysql:5.7 mysql -h192.168.2.190 -P3306 -uroot -p123456 jt_resource -t -e "SELECT task_id, sync_requested, status, created_at, started_at, completed_at, TIMESTAMPDIFF(SECOND,created_at,started_at) AS wait_s FROM agent_task WHERE task_id LIKE 's38-%' ORDER BY started_at;" 2>/dev/null

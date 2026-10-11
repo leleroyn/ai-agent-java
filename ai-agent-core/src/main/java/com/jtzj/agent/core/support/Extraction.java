@@ -167,11 +167,13 @@ public final class Extraction {
         root.put("total_units", totalUnits);
 
         ArrayNode results = root.putArray("results");
+        boolean anyNull = false;
         for (String field : fields) {
             ObjectNode r = results.addObject();
             r.put("field", field);
             LinkedHashMap<String, TreeSet<Integer>> byValue = acc.get(field);
             if (byValue == null || byValue.isEmpty()) {
+                anyNull = true;
                 r.putNull("value");
                 r.putArray("units");
                 continue;
@@ -188,6 +190,13 @@ public final class Extraction {
                     addUnits(a.putArray("units"), ranked.get(i).getValue());
                 }
             }
+        }
+
+        // 有 null 就把「这是终局结论」写进返回值：主模型只看得到 JSON，契约必须落在结果里，
+        // 否则它会换个字段名再抽一遍（抽取子模型每次都按语义匹配别名，重抽必然同解）。
+        if (anyNull && (failedUnits == null || failedUnits.isEmpty())) {
+            root.put("null_note", "value=null 表示已遍历全文全部文本块、并按语义匹配过别名仍未出现该字段，"
+                    + "这就是终局结论：不要再抽取、不要换字段名重试、不要用 understand_document 补这个字段。");
         }
 
         ArrayNode extra = null;
