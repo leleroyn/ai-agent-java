@@ -71,14 +71,29 @@ public interface TaskStore {
     void deleteIfStatus(String taskId, String status);
 
     /**
-     * Atomically take one queued task.
+     * Atomically take one queued task from the <em>async</em> lane.
+     *
+     * <p>Sync rows are excluded unless {@code mayClaimSync} is set, which happens only when the
+     * sync lane is switched off. Keeping sync rows out of this query is what makes the two lanes'
+     * concurrency counts independent of each other.
      *
      * @param workerId     identity recorded on the row
      * @param lease        how long this claim stays valid without renewal
      * @param peekLimit    how many candidate ids to inspect before giving up
+     * @param mayClaimSync true to also consider {@code sync_requested = 1} rows, claimed first
      * @return the claimed row (already {@code running}), or empty when nothing is queued
      */
-    Optional<TaskRecord> claimNext(String workerId, Duration lease, int peekLimit);
+    Optional<TaskRecord> claimNext(String workerId, Duration lease, int peekLimit,
+                                   boolean mayClaimSync);
+
+    /**
+     * Atomically take one queued {@code sync_requested = 1} task, same two-phase claim as
+     * {@link #claimNext}. Only the single sync-lane worker may call this.
+     */
+    Optional<TaskRecord> claimNextSync(String workerId, Duration lease, int peekLimit);
+
+    /** How many sync tasks are waiting; gates starting the sync-lane worker. */
+    long countQueuedSync();
 
     /** Extend this worker's lease. False means the row is no longer ours (lost or cancelled). */
     boolean renewLease(String taskId, String workerId, Duration lease, Instant now);

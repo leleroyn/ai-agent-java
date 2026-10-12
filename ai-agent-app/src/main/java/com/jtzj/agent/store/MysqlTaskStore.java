@@ -133,19 +133,37 @@ public class MysqlTaskStore implements TaskStore {
     }
 
     /**
-     * Take one queued task.
+     * Take one queued asynchronous task.
      *
      * <p>Candidates are read first, then each is claimed with a guarded update. Two workers
      * that pick the same candidate serialise on the row lock and only one gets
      * {@code affected == 1}; the other falls through to the next candidate.
+     *
+     * <p>Sync rows are filtered out here: they are claimed only through {@link #claimNextSync},
+     * which the poller runs on its single lane worker.
      */
     @Override
-    public Optional<TaskRecord> claimNext(String workerId, Duration lease, int peekLimit) {
-        List<String> candidates = jdbc.queryForList(
-                // 同步请求优先：调用方正阻塞在 HTTP 里等，异步批量任务多等一轮无感。
-                "SELECT task_id FROM agent_task WHERE status = 'accepted'"
-                        + " ORDER BY sync_requested DESC, created_at ASC, task_id ASC LIMIT ?",
-                String.class, Math.max(1, peekLimit));
+    public Optional<TaskRecord> claimNext(String workerId, Duration lease, int peekLimit,
+                                          boolean mayClaimSync) {
+        // 同步通道开着时，异步候选里根本不出现同步行；关掉时才退回这里，并且优先认领。
+        String sql = "SELECT task_id FROM agent_task WHERE status = 'accepted'"
+                + (mayClaimSync ? " ORDER BY sync_requested DESC," : " AND sync_requested = 0 ORDER BY")
+                + " created_at ASC, task_id ASC LIMIT ?";
+        return claimCandidates(sql, workerId, lease, peekLimit);
+    }
+
+    /** Take one queued sync task; identical claim mechanics to {@link #claimNext}. */
+    @Override
+    public Optional<TaskRecord> claimNextSync(String workerId, Duration lease, int peekLimit) {
+        return claimCandidates("SELECT task_id FROM agent_task"
+                + " WHERE status = 'accepted' AND sync_requested = 1"
+                + " ORDER BY created_at ASC, task_id ASC LIMIT ?", workerId, lease, peekLimit);
+    }
+
+    private Optional<TaskRecord> claimCandidates(String candidateSql, String workerId,
+                                                 Duration lease, int peekLimit) {
+        List<String> candidates = jdbc.queryForList(candidateSql, String.class,
+                Math.max(1, peekLimit));
         if (candidates.isEmpty()) {
             return Optional.empty();
         }
@@ -251,6 +269,14 @@ public class MysqlTaskStore implements TaskStore {
                 }
             }
         }
+    }
+
+    @Override
+    public long countQueuedSync() {
+        Long count = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM agent_task WHERE status = 'accepted' AND sync_requested = 1",
+                Long.class);
+        return count == null ? 0L : count;
     }
 
     @Override

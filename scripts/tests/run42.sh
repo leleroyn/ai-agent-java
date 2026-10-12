@@ -29,14 +29,14 @@ cat > c42-ok.json <<EOF
 {"taskId":"s42-ok","instruction":"识别 $SEAL 的印章，把印章上的公司名称放入键\"公司\"。最终答案只输出一个 JSON 对象。","skills":["seal-recognition"],"options":{"sync":true,"timeoutSeconds":120}}
 EOF
 curl -s -X POST $API -H "Content-Type: application/json" --data @c42-ok.json > r42-ok.json
-python3 -c "import json;d=json.load(open('r42-ok.json'))['data'];print('B',d['status'],d.get('durationMs'),(d.get('resultText') or d.get('error') or '')[:200])"
+python3 -c "import json;d=json.load(open('r42-ok.json'))['data'];print('B',d['status'],d.get('durationMs'),(d.get('resultText') or json.dumps(d.get('error'),ensure_ascii=False) or '')[:200])"
 
 echo "== C: forced OCR page failures -> partial =="
 cat > c42-partial.json <<EOF
 {"taskId":"s42-partial","instruction":"读取 $P72（72 页），抽取字段：合同名称、甲方、乙方、合同金额。最终答案只输出一个 JSON 对象，键就是上面的字段名，值为字符串，找不到的用 null。不要输出任何解释、前后缀或 Markdown 代码围栏。","options":{"sync":true,"timeoutSeconds":420}}
 EOF
 curl -s -X POST $API -H "Content-Type: application/json" --data @c42-partial.json > r42-partial.json
-python3 -c "import json;d=json.load(open('r42-partial.json'))['data'];print('C',d['status'],d.get('durationMs'),(d.get('resultText') or d.get('error') or '')[:400])"
+python3 -c "import json;d=json.load(open('r42-partial.json'))['data'];print('C',d['status'],d.get('durationMs'),(d.get('resultText') or json.dumps(d.get('error'),ensure_ascii=False) or '')[:400])"
 
 echo "== logs =="
 docker logs ai-agent-java --since 15m 2>&1 | grep -oE "ocr->txt pdf src=[^ ]* pages=[0-9/]+ failed=\[[^]]*\][^,]*|file=[^ ]*-partial.txt|partial_note|不在允许的白名单内：[0-9.]+|reuse txt" | sort | uniq -c | tail -12

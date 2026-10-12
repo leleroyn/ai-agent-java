@@ -195,7 +195,13 @@ ai-agent-java/                         Maven 父工程 (packaging=pom, groupId c
 
 - **并发=worker 线程数**：`max-concurrent` 个线程，每线程同时跑 1 个任务，直接从 `agent_task` claim，不存在内存队列。
 - **入队**：`INSERT status=accepted` 即完成入队。
-- **抢占**：MySQL 5.7 无 `FOR UPDATE SKIP LOCKED`。改为「SELECT 候选 id → `UPDATE … WHERE task_id=? AND status='accepted'`」，靠 InnoDB 行锁保证只有一个 worker `affected=1`。候选排序 `sync_requested DESC, created_at ASC, task_id ASC`：同步请求优先认领，其余按提交先后，保证公平。
+- **抢占**：MySQL 5.7 无 `FOR UPDATE SKIP LOCKED`。改为「SELECT 候选 id → `UPDATE … WHERE task_id=? AND status='accepted'`」，靠 InnoDB 行锁保证只有一个 worker `affected=1`。候选排序 `created_at ASC, task_id ASC`，按提交先后保证公平。
+- **两条通道，各自定量**：`max-concurrent` = 异步通道线程数，`sync-concurrency` = 同步通道线程数（默认各 1，每进程）。两条通道认领的行互斥：异步候选带 `sync_requested = 0`，同步候选带 `sync_requested = 1`。所以「同时跑几个异步」和「同时跑几个同步」是两个独立数字，异步长任务再久也堵不住同步调用。
+  - 两条通道都常驻，循环结构完全一样，只是候选集不同（`agent-worker-N` / `agent-sync-worker-N`）。队列空时 worker 停在 `workSignal` 上，`submit()` 提交完行就 `notifyAll()` 叫醒 ⇒ **入队到开跑不等轮询**。
+  - `max-poll-backoff-seconds`（默认 3s）退化为兜底超时，只覆盖「别的实例提交的」和「reaper 重入队的」两种情况；空闲查询频率仍是每 worker 每 3s 一条走 `idx_status_created` 的 SELECT，默认各 1 时合计约 0.67 qps。单机部署时这条兜底基本不会触发。
+  - `sync-concurrency = 0` 关闭同步通道：异步候选改回 `sync_requested DESC` 优先认领同步行，保证同步行不会没人处理。
+  - 两个数字都是**每进程**的：多实例部署时全局并发 = 实例数 ×（异步 + 同步）。要把「同时只跑一个同步」变成全局不变量，就得落到 DB（STORED 生成列 + 唯一索引，让第二条 `running & sync_requested=1` 直接撞唯一键），当前按单机资源有限的前提不做。
+  - 同步任务之间按 `created_at` 排队：前一个是 72 页长任务时，后一个同步任务要等它跑完，调用方按自己的 HTTP 超时兜底。
 - **租约/心跳**：claim 写 `lease_expires_at`（`lease-seconds`，默认 90s），执行期续租；进程被杀后租约过期，reaper（`lease-reap-seconds`）把 `running` 退回 `accepted` 重跑；累计 claim 达 `max-attempts`（默认 2）则 `failed`。租约过期比较走 Java 传参（`lease_expires_at < ?`），与时区无关。
 - **背压**：队列深度超 `max-queued-tasks` 时新提交返回 `3001 QUEUE_LIMITED` 并回滚该行。
 - **整体超时**：任务级 `timeoutSeconds`（默认 `default-timeout-seconds`，上限 `max-timeout-seconds`）→ `AGENT_TIMEOUT`。

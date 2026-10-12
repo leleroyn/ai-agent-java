@@ -151,6 +151,9 @@ public class AgentController {
         return ApiResponse.ok(Map.of(
                 "active", service.activeCount(),
                 "queued", service.queuedCount(),
+                "queuedSync", service.queuedSyncCount(),
+                "syncActive", service.syncActiveCount(),
+                "syncConcurrency", service.syncWorkerCap(),
                 "maxConcurrent", props.getExecution().getMaxConcurrent(),
                 "maxQueuedTasks", props.getExecution().getMaxQueuedTasks(),
                 "workerId", service.workerId(),

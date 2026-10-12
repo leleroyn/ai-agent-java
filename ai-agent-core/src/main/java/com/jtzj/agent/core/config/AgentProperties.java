@@ -410,8 +410,17 @@ public class AgentProperties {
 
     /** Concurrency, queueing and timeout budget. */
     public static class Execution {
-        /** Worker threads; each runs one task at a time, so this is the exact concurrency. */
-        private int maxConcurrent = 4;
+        /**
+         * Async-lane worker threads; each runs one task at a time, so this is the exact async
+         * concurrency. These threads never claim sync rows (see {@code syncConcurrency}).
+         */
+        private int maxConcurrent = 1;
+        /**
+         * Sync-lane worker threads, resident like the async workers. An idle lane costs one
+         * indexed claim query per worker per {@code maxPollBackoffSeconds}. {@code 0} switches the
+         * lane off and sync rows fall back to the async workers, claimed ahead of async work.
+         */
+        private int syncConcurrency = 1;
         private int defaultTimeoutSeconds = 120;
         private int maxTimeoutSeconds = 900;
 
@@ -438,6 +447,14 @@ public class AgentProperties {
 
         public void setMaxConcurrent(int maxConcurrent) {
             this.maxConcurrent = maxConcurrent;
+        }
+
+        public int getSyncConcurrency() {
+            return syncConcurrency;
+        }
+
+        public void setSyncConcurrency(int syncConcurrency) {
+            this.syncConcurrency = syncConcurrency;
         }
 
         public int getDefaultTimeoutSeconds() {

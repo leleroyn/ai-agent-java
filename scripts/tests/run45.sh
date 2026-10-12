@@ -19,7 +19,7 @@ body["options"]={"sync":True,"timeoutSeconds":int(sys.argv[3])}
 json.dump(body,open("c45-$1.json","w"))
 PY
   curl -s -X POST $API -H "Content-Type: application/json" --data @c45-$1.json > r45-$1.json
-  python3 -c "import json;d=json.load(open('r45-$1.json'))['data'];print('$1',d['status'],d.get('durationMs'),(d.get('resultText') or d.get('error') or '')[:220])"
+  python3 -c "import json;d=json.load(open('r45-$1.json'))['data'];print('$1',d['status'],d.get('durationMs'),(d.get('resultText') or json.dumps(d.get('error'),ensure_ascii=False) or '')[:220])"
 }
 
 echo "== T1 seal, instruction asks to verify twice =="

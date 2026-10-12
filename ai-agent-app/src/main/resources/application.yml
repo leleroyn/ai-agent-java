@@ -123,9 +123,12 @@ agent:
     permission-mode: ${AGENT_PERMISSION_MODE:BYPASS}
 
   execution:
-    # Worker threads. Each claims one task at a time directly from MySQL, so this is the exact
-    # concurrency and there is no in-memory queue that could lose work on restart.
-    max-concurrent: ${AGENT_MAX_CONCURRENT:4}
+    # 异步通道 worker 数：每个线程一次跑 1 个任务，直接认领 MySQL，所以这就是精确的异步并发数，
+    # 不存在重启会丢活的内存队列。同步行不由这些线程认领（见 sync-concurrency）。
+    max-concurrent: ${AGENT_MAX_CONCURRENT:1}
+    # 同步通道 worker 数：与异步通道一样常驻，空闲时每 worker 每 max-poll-backoff-seconds 一条索引查询。
+    # 0 = 关闭同步通道，同步行退回异步线程认领（排在异步前面）。
+    sync-concurrency: ${AGENT_SYNC_CONCURRENCY:1}
     default-timeout-seconds: ${AGENT_DEFAULT_TIMEOUT:120}
     max-timeout-seconds: ${AGENT_MAX_TIMEOUT:900}
     # A claim is valid for this long and is renewed while the task runs. If the process dies the
@@ -134,7 +137,8 @@ agent:
     lease-reap-seconds: ${AGENT_LEASE_REAP_SECONDS:30}
     # Total claims allowed per task before it is failed with AGENT_LEASE_EXPIRED.
     max-attempts: ${AGENT_MAX_ATTEMPTS:2}
-    # Poll pacing while the queue looks empty; doubles up to max-poll-backoff-seconds.
+    # 队列空时 worker 停在信号上，本地提交立刻唤醒；下面的超时只兜底跨实例提交和 reaper 重入队。
+    # poll-interval-ms 现在只用于 DB 出错后的重试间隔。
     poll-interval-ms: ${AGENT_POLL_INTERVAL_MS:250}
     max-poll-backoff-seconds: ${AGENT_POLL_BACKOFF_SECONDS:3}
     claim-peek: 5

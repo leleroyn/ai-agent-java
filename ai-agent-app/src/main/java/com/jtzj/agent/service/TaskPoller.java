@@ -36,6 +36,13 @@ import java.util.concurrent.atomic.AtomicInteger;
  * claim the next. A row is only ever held by one worker because claiming is a conditional
  * update, so this is safe across several instances of the service sharing one database.
  *
+ * <p>Sync and async work run in two resident lanes with separate sizes: {@code maxConcurrent}
+ * async workers claim only {@code sync_requested = 0} rows, and {@code syncConcurrency} sync-lane
+ * workers claim only sync rows. A long async run therefore cannot starve a caller blocked in HTTP,
+ * and "how many async tasks at once" and "how many sync tasks at once" are independent numbers.
+ * Both sizes are per process. An idle lane costs one indexed claim query per worker per
+ * {@code maxPollBackoffSeconds}, which is cheap enough to keep the lane open permanently.
+ *
  * <p>Crash behaviour: a claim carries a lease. If the process dies, the lease lapses and the
  * reaper returns the task to {@code accepted} (up to {@code maxAttempts}), so queued <em>and
  * in-flight</em> work both survive a restart instead of being lost.
@@ -64,6 +71,14 @@ public class TaskPoller implements DisposableBean {
     private final java.util.concurrent.ConcurrentHashMap<String, Thread> executing =
             new java.util.concurrent.ConcurrentHashMap<>();
     private volatile boolean running;
+    /** How many sync-lane workers are executing a task right now. */
+    private final AtomicInteger syncActive = new AtomicInteger();
+    /**
+     * Idle workers park here and a local submit wakes them, so enqueue-to-start latency does not
+     * depend on the poll interval. The wait timeout stays as a safety net for work that arrives
+     * through another instance or the lease reaper.
+     */
+    private final Object workSignal = new Object();
 
     public TaskPoller(TaskStore store, AgentTaskRunner runner, AgentProperties props,
                       ObjectMapper jackson2, CallbackNotifier callbackNotifier) {
@@ -101,16 +116,36 @@ public class TaskPoller implements DisposableBean {
             thread.start();
         }
 
+        // 同步通道和异步通道一样常驻。0 = 关闭通道，此时同步行由异步 worker 优先认领。
+        int syncLane = syncLaneSize();
+        for (int i = 1; i <= syncLane; i++) {
+            Thread thread = new Thread(this::syncPollLoop, "agent-sync-worker-" + i);
+            thread.setDaemon(false);
+            workers.add(thread);
+            thread.start();
+        }
+
         int reapSeconds = Math.max(5, props.getExecution().getLeaseReapSeconds());
         scheduler.scheduleWithFixedDelay(this::reapQuietly, reapSeconds, reapSeconds, TimeUnit.SECONDS);
 
-        log.info("task poller started workerId={} concurrency={} lease={}s reap={}s maxAttempts={}",
-                workerId, concurrency, props.getExecution().getLeaseSeconds(),
+        log.info("task poller started workerId={} asyncWorkers={} syncWorkers={} lease={}s"
+                        + " reap={}s maxAttempts={}",
+                workerId, concurrency, syncLane, props.getExecution().getLeaseSeconds(),
                 reapSeconds, props.getExecution().getMaxAttempts());
     }
 
     public int activeCount() {
         return active.get();
+    }
+
+    /** How many sync-lane workers are executing a task right now. */
+    public int syncActiveCount() {
+        return syncActive.get();
+    }
+
+    /** Configured sync-lane size; 0 means the lane is off. */
+    public int syncWorkerCap() {
+        return syncLaneSize();
     }
 
     public String workerId() {
@@ -144,7 +179,9 @@ public class TaskPoller implements DisposableBean {
             try {
                 claimed = store.claimNext(workerId,
                         Duration.ofSeconds(props.getExecution().getLeaseSeconds()),
-                        props.getExecution().getClaimPeek());
+                        props.getExecution().getClaimPeek(),
+                        // 同步通道开着时，异步线程看不到同步行。
+                        syncLaneSize() <= 0);
             } catch (Exception e) {
                 log.warn("poll failed, retrying in {}ms: {}", backoffMs, e.getMessage());
                 if (!sleep(backoffMs)) {
@@ -154,14 +191,12 @@ public class TaskPoller implements DisposableBean {
             }
 
             if (claimed.isEmpty()) {
-                if (!sleep(backoffMs)) {
+                if (!idleWait(maxMs)) {
                     return;
                 }
-                backoffMs = Math.min(maxMs, backoffMs * 2);
                 continue;
             }
 
-            backoffMs = baseMs;
             active.incrementAndGet();
             try {
                 execute(claimed.get());
@@ -169,6 +204,85 @@ public class TaskPoller implements DisposableBean {
                 active.decrementAndGet();
             }
         }
+    }
+
+    /**
+     * The sync lane: the same loop as {@link #pollLoop()}, claiming only sync rows. Resident like
+     * the async workers, so there is no wake-up path to get wrong and no race between "lane
+     * closing" and "submit arriving" — the idle cost is one indexed claim query per worker per
+     * {@code maxPollBackoffSeconds}.
+     */
+    private void syncPollLoop() {
+        long baseMs = Math.max(50L, props.getExecution().getPollIntervalMs());
+        long maxMs = Math.max(baseMs, props.getExecution().getMaxPollBackoffSeconds() * 1000L);
+        long backoffMs = baseMs;
+
+        while (running) {
+            Optional<TaskRecord> claimed;
+            try {
+                claimed = store.claimNextSync(workerId,
+                        Duration.ofSeconds(props.getExecution().getLeaseSeconds()),
+                        props.getExecution().getClaimPeek());
+            } catch (Exception e) {
+                log.warn("sync poll failed, retrying in {}ms: {}", backoffMs, e.getMessage());
+                if (!sleep(backoffMs)) {
+                    return;
+                }
+                backoffMs = Math.min(maxMs, backoffMs * 2);
+                continue;
+            }
+
+            if (claimed.isEmpty()) {
+                if (!idleWait(maxMs)) {
+                    return;
+                }
+                continue;
+            }
+
+            log.info("sync lane claimed task {}", claimed.get().getTaskId());
+            active.incrementAndGet();
+            syncActive.incrementAndGet();
+            try {
+                execute(claimed.get());
+            } finally {
+                syncActive.decrementAndGet();
+                active.decrementAndGet();
+            }
+        }
+    }
+
+    /**
+     * Wake every parked worker. Call right after a row is committed into {@code accepted}.
+     *
+     * <p>Both lanes wake: one extra claim query on the other lane is cheaper than keeping two
+     * signal objects, and the claim is a no-op when the work belongs to the other lane.
+     */
+    public void signalWorkQueued() {
+        synchronized (workSignal) {
+            workSignal.notifyAll();
+        }
+    }
+
+    /**
+     * Park until {@link #signalWorkQueued()} or the safety timeout.
+     *
+     * @return false when interrupted, meaning the poller is shutting down
+     */
+    private boolean idleWait(long timeoutMs) {
+        try {
+            synchronized (workSignal) {
+                workSignal.wait(timeoutMs);
+            }
+            return true;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+    }
+
+    /** Configured sync-lane size; 0 means the lane is off and sync rows go to the async workers. */
+    private int syncLaneSize() {
+        return Math.max(0, props.getExecution().getSyncConcurrency());
     }
 
     private void execute(TaskRecord task) {
@@ -286,6 +400,10 @@ public class TaskPoller implements DisposableBean {
             if (requeued > 0 || exhausted > 0) {
                 log.warn("lease reaper: requeued={} exhausted={}", requeued, exhausted);
             }
+            if (requeued > 0) {
+                signalWorkQueued();
+            }
+
         } catch (Exception e) {
             log.warn("lease reaper failed: {}", e.getMessage());
         }
@@ -338,5 +456,10 @@ public class TaskPoller implements DisposableBean {
     /** Exposed for the health endpoint. */
     public long queuedCount() {
         return store.countByStatus(TaskStatus.ACCEPTED);
+    }
+
+    /** Sync queue depth, exposed for the health endpoint. */
+    public long queuedSyncCount() {
+        return store.countQueuedSync();
     }
 }

@@ -146,6 +146,9 @@ public class AgentTaskService {
         log.info("task {} queued, budgetSeconds={} hasSchema={} skills={}",
                 taskId, budget.toSeconds(), schema != null,
                 skills.isEmpty() ? "(all)" : skills);
+        // 行已提交，立刻叫醒 parked 的 worker：入队到开跑的延迟不再取决于轮询间隔。
+        poller.signalWorkQueued();
+
         return new Submission(candidate, true, budget);
     }
 
@@ -205,6 +208,19 @@ public class AgentTaskService {
 
     public long queuedCount() {
         return poller.queuedCount();
+    }
+
+    /** Sync-lane occupancy and sync queue depth, for health reporting. */
+    public long queuedSyncCount() {
+        return poller.queuedSyncCount();
+    }
+
+    public int syncWorkerCap() {
+        return poller.syncWorkerCap();
+    }
+
+    public int syncActiveCount() {
+        return poller.syncActiveCount();
     }
 
     public String workerId() {
