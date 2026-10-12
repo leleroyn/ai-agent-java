@@ -413,8 +413,10 @@ public class AgentProperties {
         /**
          * Async-lane worker threads; each runs one task at a time, so this is the exact async
          * concurrency. These threads never claim sync rows (see {@code syncConcurrency}).
+         * Renamed from {@code maxConcurrent}: once sync got its own lane, the old name stopped
+         * saying which lane it bounded.
          */
-        private int maxConcurrent = 1;
+        private int asyncConcurrency = 1;
         /**
          * Sync-lane worker threads, resident like the async workers. An idle lane costs one
          * indexed claim query per worker per {@code maxPollBackoffSeconds}. {@code 0} switches the
@@ -430,7 +432,7 @@ public class AgentProperties {
         private int leaseReapSeconds = 30;
         /** How many times a task may be claimed in total before it is failed. */
         private int maxAttempts = 2;
-        /** Base delay between empty polls; grows exponentially up to maxPollBackoffSeconds. */
+        /** Retry delay after a claim query fails; idle workers park on a signal, they do not poll. */
         private int pollIntervalMs = 250;
         private int maxPollBackoffSeconds = 3;
         /** Candidate ids inspected per poll before giving up (reduces claim contention). */
@@ -441,12 +443,12 @@ public class AgentProperties {
          */
         private int maxQueuedTasks = 1000;
 
-        public int getMaxConcurrent() {
-            return maxConcurrent;
+        public int getAsyncConcurrency() {
+            return asyncConcurrency;
         }
 
-        public void setMaxConcurrent(int maxConcurrent) {
-            this.maxConcurrent = maxConcurrent;
+        public void setAsyncConcurrency(int asyncConcurrency) {
+            this.asyncConcurrency = asyncConcurrency;
         }
 
         public int getSyncConcurrency() {

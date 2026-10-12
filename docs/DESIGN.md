@@ -31,7 +31,7 @@ Spring Boot Web (AgentController)  ──►  AgentTaskService（提交/查询/�
 agent_task 表 = 状态存储 + 工作队列 (MySQL)
    ▲│  入队 INSERT status=accepted        │ claim = SELECT 候选 id → 条件 UPDATE 抢占(带租约)
    ▼│                                     ▼
-TaskPoller：max-concurrent 个 worker 线程，每线程 claim → run(续租) → claim
+TaskPoller：async-concurrency + sync-concurrency 两组常驻 worker，每线程 claim → run(续租) → claim
    ▼
 AgentTaskRunner → ReActAgent.call(msgs, schemaNode, ctx)
    ├─ ModelFactory.build(modelName)   OpenAIChatModel → agent.models.<flash|pro>.base-url（本地 llama.cpp/vLLM）
@@ -143,7 +143,7 @@ ai-agent-java/                         Maven 父工程 (packaging=pom, groupId c
 | DELETE | `/task/{taskId}` | 取消（仅未开始的可取消，否则 2002） |
 | GET | `/tools` | 列出**自定义工具**（当前 3 个，来自 SPI，不含框架内置） |
 | GET | `/skills` | 列出已安装技能名 |
-| GET | `/health` | 运行态：`model`/`maxConcurrent`/`queued`/`active`/`workerId`/`permissionMode`/`maxQueuedTasks` |
+| GET | `/health` | 运行态：`model`/`asyncConcurrency`/`syncConcurrency`/`queued`/`queuedSync`/`active`/`syncActive`/`workerId`/`permissionMode`/`maxQueuedTasks` |
 
 ### 提交体 `AgentTaskRequest`
 ```json
@@ -181,7 +181,7 @@ ai-agent-java/                         Maven 父工程 (packaging=pom, groupId c
 | `agent.vision` | 独立视觉模型：`base-url` `api-key` `name` `temperature` `reasoning-effort` `max-tokens` `max-images` `max-image-bytes` `timeout-seconds` |
 | `agent.text-model` | 抽取/QA 的纯文本子调用用的 profile 名（`agent.models.*`），默认 `pro`；留空=回退视觉端点 |
 | `agent.runner` | `name` `sys-prompt` `max-iters` `permission-mode`(默认 `BYPASS`) |
-| `agent.execution` | `max-concurrent`(4) `default-timeout-seconds`(120) `max-timeout-seconds`(900) `lease-seconds`(90) `lease-reap-seconds`(30) `max-attempts`(2) `poll-interval-ms` `claim-peek` `max-queued-tasks`(1000) |
+| `agent.execution` | `async-concurrency`(1) `sync-concurrency`(1) `default-timeout-seconds`(120) `max-timeout-seconds`(900) `lease-seconds`(90) `lease-reap-seconds`(30) `max-attempts`(2) `poll-interval-ms` `claim-peek` `max-queued-tasks`(1000) |
 | `agent.tools.*` | 自定义工具按 provider 名开关（默认开）+ 框架内置 `shell/read-file/write-file/todo` + `working-dir` `shell-allowed-commands` `delete-workspace-on-finish` |
 | `agent.pdfs` | `enabled` `pages-per-call` `concurrency` `ocr-parallelism` `understand-parallelism` `max-pages` `max-image-dimension` `jpeg-quality` `timeout-seconds` `max-download-bytes` `text-chunk-size` `text-chunk-overlap` `ssrf-allowlist` |
 | `agent.ips` | 综合服务平台，Java 侧只剩 OCR：`enabled` `base-url` `ocr-timeout-seconds` `rasterize-dpi` `max-image-dimension` `jpeg-quality` `resize` `use-cls` `format` `app-id`。印章/发票走镜像内置 `ips` CLI，其超时是 OS 变量 `IPS_TIMEOUT_SECONDS`（不在 Spring 配置里） |
@@ -193,10 +193,10 @@ ai-agent-java/                         Maven 父工程 (packaging=pom, groupId c
 
 ## 7. 并发、租约与崩溃恢复
 
-- **并发=worker 线程数**：`max-concurrent` 个线程，每线程同时跑 1 个任务，直接从 `agent_task` claim，不存在内存队列。
+- **并发=worker 线程数**：`async-concurrency` 个异步线程 + `sync-concurrency` 个同步线程，每线程同时跑 1 个任务，直接从 `agent_task` claim，不存在内存队列。
 - **入队**：`INSERT status=accepted` 即完成入队。
 - **抢占**：MySQL 5.7 无 `FOR UPDATE SKIP LOCKED`。改为「SELECT 候选 id → `UPDATE … WHERE task_id=? AND status='accepted'`」，靠 InnoDB 行锁保证只有一个 worker `affected=1`。候选排序 `created_at ASC, task_id ASC`，按提交先后保证公平。
-- **两条通道，各自定量**：`max-concurrent` = 异步通道线程数，`sync-concurrency` = 同步通道线程数（默认各 1，每进程）。两条通道认领的行互斥：异步候选带 `sync_requested = 0`，同步候选带 `sync_requested = 1`。所以「同时跑几个异步」和「同时跑几个同步」是两个独立数字，异步长任务再久也堵不住同步调用。
+- **两条通道，各自定量**：`async-concurrency` = 异步通道线程数，`sync-concurrency` = 同步通道线程数（默认各 1，每进程）。两条通道认领的行互斥：异步候选带 `sync_requested = 0`，同步候选带 `sync_requested = 1`。所以「同时跑几个异步」和「同时跑几个同步」是两个独立数字，异步长任务再久也堵不住同步调用。
   - 两条通道都常驻，循环结构完全一样，只是候选集不同（`agent-worker-N` / `agent-sync-worker-N`）。队列空时 worker 停在 `workSignal` 上，`submit()` 提交完行就 `notifyAll()` 叫醒 ⇒ **入队到开跑不等轮询**。
   - `max-poll-backoff-seconds`（默认 3s）退化为兜底超时，只覆盖「别的实例提交的」和「reaper 重入队的」两种情况；空闲查询频率仍是每 worker 每 3s 一条走 `idx_status_created` 的 SELECT，默认各 1 时合计约 0.67 qps。单机部署时这条兜底基本不会触发。
   - `sync-concurrency = 0` 关闭同步通道：异步候选改回 `sync_requested DESC` 优先认领同步行，保证同步行不会没人处理。

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# 两条通道（异步 max-concurrent / 同步 sync-concurrency）的回归（DESIGN §7）。
-# 前提：AGENT_MAX_CONCURRENT=1、AGENT_SYNC_CONCURRENCY=1（默认值）。
+# 两条通道（异步 async-concurrency / 同步 sync-concurrency）的回归（DESIGN §7）。
+# 前提：AGENT_ASYNC_CONCURRENCY=1、AGENT_SYNC_CONCURRENCY=1（默认值）。
 # 每次换 taskId 后缀，避免命令行幂等重放掩盖真实行为。
 set -e
 cd /data/ai-agent
@@ -10,7 +10,7 @@ SUF=$(date +%H%M%S)
 API=http://localhost:8080/api/v1/agent/task
 HEALTH=http://localhost:8080/api/v1/agent/health
 DB() { docker run --rm mysql:5.7 mysql -h192.168.2.190 -P3306 -uroot -p123456 jt_resource -N -e "$1" 2>/dev/null; }
-H() { curl -s $HEALTH | python3 -c "import json,sys;d=json.load(sys.stdin)['data'];print({k:d.get(k) for k in ('active','queued','queuedSync','syncActive','syncConcurrency','maxConcurrent')})"; }
+H() { curl -s $HEALTH | python3 -c "import json,sys;d=json.load(sys.stdin)['data'];print({k:d.get(k) for k in ('active','queued','queuedSync','syncActive','syncConcurrency','asyncConcurrency')})"; }
 
 submit() { # $1=id $2=instruction $3=sync(true/false) $4=timeout
   python3 - "$1" "$2" "$3" "$4" <<PY

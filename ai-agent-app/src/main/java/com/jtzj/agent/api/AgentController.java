@@ -154,7 +154,7 @@ public class AgentController {
                 "queuedSync", service.queuedSyncCount(),
                 "syncActive", service.syncActiveCount(),
                 "syncConcurrency", service.syncWorkerCap(),
-                "maxConcurrent", props.getExecution().getMaxConcurrent(),
+                "asyncConcurrency", props.getExecution().getAsyncConcurrency(),
                 "maxQueuedTasks", props.getExecution().getMaxQueuedTasks(),
                 "workerId", service.workerId(),
                 "model", defaultModel,

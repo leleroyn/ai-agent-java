@@ -578,7 +578,10 @@ ocr_text, corp_image_base64}`。`ocr_text` 同样是 JSON 字符串，要再解�
   "data": {
     "active": 0,
     "queued": 0,
-    "maxConcurrent": 4,
+    "queuedSync": 0,
+    "syncActive": 0,
+    "asyncConcurrency": 1,
+    "syncConcurrency": 1,
     "maxQueuedTasks": 1000,
     "workerId": "JTZJ-PC-29336-be6b7e27",
     "model": "qwen",
@@ -589,9 +592,12 @@ ocr_text, corp_image_base64}`。`ocr_text` 同样是 JSON 字符串，要再解�
 
 | 字段 | 说明 |
 |---|---|
-| `active` | 本实例正在执行的任务数 |
+| `active` | 本实例正在执行的任务数（异步 + 同步两条通道合计） |
 | `queued` | 全库排队中的任务数（跨实例汇总，读自 MySQL） |
-| `maxConcurrent` | 本实例 worker 线程数，即精确并发上限 |
+| `queuedSync` | 全库排队中的同步任务数（`sync_requested = 1`） |
+| `syncActive` | 本实例同步通道正在执行的任务数 |
+| `asyncConcurrency` | 本实例异步通道线程数 = 异步并发上限（旧名 `maxConcurrent`） |
+| `syncConcurrency` | 本实例同步通道线程数；`0` = 同步通道关闭 |
 | `workerId` | 实例标识（主机-PID-随机串），用于定位是哪个进程领取了任务 |
 
 没有 `status` 字段：`code=0` 且能返回就是健康。该端点不查依赖、不做探活判断。
@@ -635,7 +641,7 @@ done
 | metadata 最大 | 8192 字符 | `AGENT_LIMIT_METADATA` |
 | 默认超时 | 120 秒 | `AGENT_DEFAULT_TIMEOUT` |
 | 最大超时 | 900 秒 | `AGENT_MAX_TIMEOUT` |
-| 并发上限 | 4 | `AGENT_MAX_CONCURRENT` |
+| 并发上限（异步 / 同步） | 1 / 1 | `AGENT_ASYNC_CONCURRENCY` / `AGENT_SYNC_CONCURRENCY` |
 | 队列积压上限（超过返 3001） | 1000 | `AGENT_MAX_QUEUED_TASKS` |
 | 任务领取租约 | 90 秒 | `AGENT_LEASE_SECONDS` |
 | 单任务最多领取次数 | 2 | `AGENT_MAX_ATTEMPTS` |

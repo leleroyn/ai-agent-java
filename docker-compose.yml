@@ -40,7 +40,7 @@ services:
       AGENT_BASE_URL: ${AGENT_BASE_URL:-http://192.168.1.250:8009/v1}
       AGENT_MODEL_NAME: ${AGENT_MODEL_NAME:-qwen}
       AGENT_PERMISSION_MODE: ${AGENT_PERMISSION_MODE:-BYPASS}
-      AGENT_MAX_CONCURRENT: ${AGENT_MAX_CONCURRENT:-4}
+      AGENT_ASYNC_CONCURRENCY: ${AGENT_ASYNC_CONCURRENCY:-1}
       # 技能目录：宿主机 ./agent-skills 只读挂到 /skills，改 SKILL.md 下一个任务即生效。
       AGENT_SKILLS_DIR: /skills
       # 容器内统一用绝对路径：每任务实际跑在 /workspace/<taskId>。

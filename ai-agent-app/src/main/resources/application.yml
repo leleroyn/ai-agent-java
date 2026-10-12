@@ -125,7 +125,8 @@ agent:
   execution:
     # 异步通道 worker 数：每个线程一次跑 1 个任务，直接认领 MySQL，所以这就是精确的异步并发数，
     # 不存在重启会丢活的内存队列。同步行不由这些线程认领（见 sync-concurrency）。
-    max-concurrent: ${AGENT_MAX_CONCURRENT:1}
+    # 旧键 AGENT_MAX_CONCURRENT 只作兜底（新键缺失时才生效），新配置一律写 AGENT_ASYNC_CONCURRENCY。
+    async-concurrency: ${AGENT_ASYNC_CONCURRENCY:${AGENT_MAX_CONCURRENT:1}}
     # 同步通道 worker 数：与异步通道一样常驻，空闲时每 worker 每 max-poll-backoff-seconds 一条索引查询。
     # 0 = 关闭同步通道，同步行退回异步线程认领（排在异步前面）。
     sync-concurrency: ${AGENT_SYNC_CONCURRENCY:1}

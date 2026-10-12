@@ -32,11 +32,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 /**
  * Executes tasks by polling {@code agent_task} — there is no in-memory queue.
  *
- * <p>Each of the {@code maxConcurrent} worker threads loops: claim one queued row, run it,
+ * <p>Each of the {@code asyncConcurrency} worker threads loops: claim one queued row, run it,
  * claim the next. A row is only ever held by one worker because claiming is a conditional
  * update, so this is safe across several instances of the service sharing one database.
  *
- * <p>Sync and async work run in two resident lanes with separate sizes: {@code maxConcurrent}
+ * <p>Sync and async work run in two resident lanes with separate sizes: {@code asyncConcurrency}
  * async workers claim only {@code sync_requested = 0} rows, and {@code syncConcurrency} sync-lane
  * workers claim only sync rows. A long async run therefore cannot starve a caller blocked in HTTP,
  * and "how many async tasks at once" and "how many sync tasks at once" are independent numbers.
@@ -108,7 +108,7 @@ public class TaskPoller implements DisposableBean {
         // Recover anything a previous process left mid-flight before accepting new work.
         reapQuietly();
 
-        int concurrency = Math.max(1, props.getExecution().getMaxConcurrent());
+        int concurrency = Math.max(1, props.getExecution().getAsyncConcurrency());
         for (int i = 1; i <= concurrency; i++) {
             Thread thread = new Thread(this::pollLoop, "agent-worker-" + i);
             thread.setDaemon(false);
