@@ -95,17 +95,18 @@ agent:
       规则：
       - 指令自包含时直接回答，不调工具；但指令里出现文件 URL 或文件路径时不算自包含：文件内容只能来自工具返回，禁止凭记忆或猜测写出字段值。
       - 你不能看图/PDF/TXT，绝对禁止 read-file 或 shell 打印图片/PDF/TXT内容；只能用专用工具处理。
-      - 文档来源是 http(s) URL 或工作目录下的本地路径。
+      - 文档来源只能是本任务工作目录下的本地路径：指令里点名的文件已在任务启动前下载到 src/ 下，
+        指令里写的就是可直接使用的路径，原样传给工具即可。
       - 要字段值 → extract_document_fields；要开放理解 → understand_document。
       - 任务是"找特定信息"时优先用 extract_document_fields。
       - 每个目标只调一次工具，第一次返回即权威，不得重复调用确认。
       - extract_document_fields 的 value 就是权威结论：同一字段只会给一条 value，其余候选在 alternates 里，以 value 为准，不要自己挑。
       - 抽取类任务调一次 extract_document_fields 就结束了：value=null 表示全文已遍历、已按语义匹配过别名，
         这就是终局结论。绝对禁止为了补 null 字段去调 understand_document，也禁止换个字段名再抽一遍。
-      - 印章只用 recognize_seal、发票只用 recognize_invoice，这两个工具的返回就是权威结论；
-        不得用 extract_document_fields 或 understand_document 去补印章/发票字段，也不得因为没检出就换工具再查。
-      - 文档类工具都能直接吃 http(s) URL：绝对禁止先用 shell 把文件下载成本地文件再传路径，
-        同一份内容出现两个身份会让已识别的文本被重跑一遍。
+      - 印章、发票、身份证、营业执照的结论只来自对应的识别通道（见匹配到的技能说明），它的返回就是权威结论；
+        不得用 extract_document_fields 或 understand_document 去补这几类字段，也不得因为没检出就换工具再查。
+      - 工具不接受 URL：绝对禁止用 shell 下载文件，也不要把指令里的 URL 或自己拼的 URL 当来源传进去；
+        工具会直接报错，白烧一轮。
       - 涉及日期/时间必须调 get_system_time，禁止凭记忆推断。
       - 信息够了就输出结果并停止。
       - 指令要求 JSON/结构化输出时，最终答案只输出 JSON 本身：不加解释、不加前后缀、不用 Markdown 代码围栏。
@@ -171,16 +172,18 @@ agent:
     # 页边界打包用不到重叠；退回字符窗口时留一点，避免正好劈开一个值。
     text-chunk-overlap: ${AGENT_PDF_TEXT_CHUNK_OVERLAP:400}
     # SSRF 主机白名单（后缀匹配）；留空=允许任意 http/https（与图片工具一致）。
-    # 约束所有文档抓取：OCR 转文本、recognize_seal、recognize_invoice、PDF 理解。
+    # 约束任务启动前的文件下载（SourceIngestor）——工具层已不再下载任何 URL，只剩这一条通道。
     # 环境变量 AGENT_PDF_SSRF_ALLOWLIST（逗号分隔）。
     # 之前这里只有注释、没有绑定，.env.example 里写的那个键实际上拿不到。
     ssrf-allowlist: ${AGENT_PDF_SSRF_ALLOWLIST:}
 
-  # 综合服务平台（IPS）：OCR / 印章 / 发票三个接口，同一台服务、同一个基址。
+  # 综合服务平台（IPS）：同一台服务、同一个基址。
   #   POST /api/v3/ocr/preprocess      抽取类任务的统一文本通道（图片与 PDF 一律先 OCR 换文本）
-  #   POST /api/v3/seal/preprocess     内置工具 recognize_seal（印章）
-  #   POST /api/v3/invoice/preprocess  内置工具 recognize_invoice（发票）
-  # base-url 留空 = 三个能力一起关掉：抽取无法进行，两个识别工具直接报错。
+  #   POST /api/v3/seal/preprocess     印章识别——技能 seal-recognition 经镜像内置 ips CLI
+  #   POST /api/v3/invoice/preprocess  发票识别——技能 invoice-recognition 经镜像内置 ips CLI
+  #   POST /api/v3/idcard/preprocess   身份证识别——技能 idcard-recognition，同上（只收图片）
+  #   POST /api/v3/bizlic/preprocess   营业执照识别——技能 bizlic-recognition，同上（只收图片）
+  # base-url 留空 = OCR 不可用，抽取无法进行；CLI 侧 IPS_BASE_URL 由 scripts/docker-run.sh 同源注入。
   # OCR 一页一请求（服务端按页拼接会丢空白页、页码对不上）；PDF 的页级并发在 agent.pdfs.ocr-parallelism。
   # format：txt=OpenOCR，单页快约 4 倍，但会丢字段标签（实测营业执照的「注册资本」标签在 txt
   # 里整个消失，只剩裸数值，抽取只能靠猜）；md=走 vLLM，保留标签与版面，抽取召回明显更好。
@@ -188,8 +191,8 @@ agent:
   ips:
     enabled: ${AGENT_IPS_ENABLED:true}
     base-url: ${AGENT_IPS_BASE_URL:http://127.0.0.1:8000}
-    # 印章/发票单次请求超时（秒）：PDF 逐页检测、发票内部还走大模型，比 OCR 慢，给足。
-    timeout-seconds: ${AGENT_IPS_TIMEOUT:180}
+    # 印章/发票/身份证/营业执照不在 Java 侧调用：由镜像内置 ips CLI 走，CLI 自带 --timeout 默认 180s；
+    # 想把它和本键绑成一个旋钮，scripts/docker-run.sh 会把本值注入成容器里的 IPS_TIMEOUT_SECONDS。
     # ---- OCR 接口 ----
     ocr-timeout-seconds: ${AGENT_IPS_OCR_TIMEOUT:120}
     # OCR 栅格化 dpi / 最长边像素上限（0=不缩放，保识别分辨率）/ JPEG 质量。
@@ -216,19 +219,29 @@ agent:
     document-understand: ${AGENT_TOOL_DOCUMENT_UNDERSTAND:true}
     # 自定义工具：extract_document_fields（图片/PDF/TXT 字段抽取）。
     document-extract: ${AGENT_TOOL_DOCUMENT_EXTRACT:true}
-    # 自定义工具：recognize_seal（印章识别，专用接口）。
-    seal-recognition: ${AGENT_TOOL_SEAL_RECOGNITION:true}
-    # 自定义工具：recognize_invoice（发票识别，专用接口）。
-    invoice-recognition: ${AGENT_TOOL_INVOICE_RECOGNITION:true}
 
     # Sandbox root. Each task gets its own private subdirectory <working-dir>/<taskId>,
     # which is what the file tools are actually confined to.
     working-dir: ${AGENT_WORKING_DIR:./agent-workspace}
-    # Delete a task's directory once it reaches a terminal state. Keep false while you want
-    # to inspect files the agent produced; the workspace doubles as the audit trail.
+    # The ONLY cleanup switch: when true the whole task directory (src/, .ocr/, .ingest/) goes
+    # away at a terminal state; when false nothing is deleted. Keep false in test to inspect
+    # what the agent actually fetched and recognised; keep true in production, otherwise every
+    # scan leaves tens of MB on disk forever.
     delete-workspace-on-finish: ${AGENT_DELETE_WORKSPACE_ON_FINISH:false}
-    # Shell allowlist. Empty = no allowlist restriction (subject to permission mode).
+    # Shell allowlist, checked PER SEGMENT (split on ; | & newline), so pipes still work.
+    # Empty = no allowlist, every executable may run (subject to permission mode).
+    # AGENT_SHELL_ALLOWED=ips is the "shell must not read local files" setting: only the bundled
+    # ips CLI runs, cat/grep/head/python are all rejected. File tools are a separate switch
+    # (AGENT_TOOL_READ) and still read inside the task directory, set that false too to close it.
     shell-allowed-commands: ${AGENT_SHELL_ALLOWED:}
+    # Shell command blacklist, also per segment. An entry matches either the executable basename
+    # (curl) or a path suffix (native/ips), so /opt/agent-cli/native/ips is caught as well.
+    # curl/wget are denied because SourceIngestor already put every instruction file under src/ and
+    # the tools only accept local paths — a second download would give the same content two
+    # identities and the dedup stops working (that is what re-OCR'd a 72-page scan once).
+    # /opt/agent-cli/native/ips is the unwrapped binary: denying it keeps the wrapper's
+    # IPS_ALLOWED_SUBCOMMANDS gate from being bypassed with an absolute path.
+    shell-denied-commands: ${AGENT_SHELL_DENIED:curl,wget,/opt/agent-cli/native/ips}
 
   skills:
     # Reusable skills, AgentScope-style: <location>/<name>/SKILL.md with YAML frontmatter.

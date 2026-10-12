@@ -67,7 +67,7 @@ ai-agent-java/                         Maven 父工程 (packaging=pom, groupId c
 │       │              PdfService             整篇遍历 + 分批并发结构化抽取 + 确定性归并 + 页码溯源；理解类分批问全文再归并成一段
 │       │                                   需要 OCR 的页走 OCR 文本通道，其余页取文字层
 │       ├── support/   MediaInputs · Extraction · SandboxPaths · SourceFiles
-│       │                                   入参解析 / 抽取归并 / 沙箱路径校验 / 来源落地（URL 下载 + 内容哈希）
+│       │                                   入参解析 / 抽取归并 / 沙箱路径校验 / 来源落地（本地路径 + 内容哈希）
 │       ├── error/     AgentException · ErrorCodes
 │       └── spi/       AgentToolProvider · ToolContext             工具自注册接口
 │
@@ -75,10 +75,8 @@ ai-agent-java/                         Maven 父工程 (packaging=pom, groupId c
 │   └── src/main/java/com/jtzj/agent/tools/    （每个工具类 + 同名 Provider，Provider 是 @Component）
 │       ├── DocumentUnderstandTools  + DocumentUnderstandToolProvider  (understand_document)
 │       ├── DocumentExtractTools     + DocumentExtractToolProvider     (extract_document_fields)
-│       ├── SealRecognitionTools     + SealRecognitionToolProvider     (recognize_seal)
-│       ├── InvoiceRecognitionTools  + InvoiceRecognitionToolProvider  (recognize_invoice)
 │       └── SystemTimeTools          + SystemTimeToolProvider          (get_system_time)
-│       （共用管线：IpsRecognitionSupport —— 来源落地 + 逐来源调用 + 按来源汇总）
+│       （印章 / 发票 / 身份证 / 营业执照不再是 Java 工具：改走内置技能 + 镜像里的 ips CLI，见 §12）
 │
 ├── ai-agent-app/                    【Spring Boot 主应用】依赖 tools + core；启动时收集所有 provider
 │   ├── pom.xml                      spring-boot-maven-plugin 在此；finalName=ai-agent-java-<ver>
@@ -159,7 +157,7 @@ ai-agent-java/                         Maven 父工程 (packaging=pom, groupId c
   "metadata": { "projectId": "..." }
 }
 ```
-图片/文档来源以 URL 形式写在 `instruction` 文本里，由 Agent 自行调用工具；请求体不设专门的 images/files 字段。
+图片/文档来源以 URL 形式写在 `instruction` 文本里；任务启动前由 `SourceIngestor` 把其中的文件 URL 抓到 `<taskDir>/src/` 并把指令原地改写成本地相对路径，工具只吃本地路径（见 §11）。请求体不设专门的 images/files 字段。
 
 ### 结果视图 `TaskStatusView`
 ```json
@@ -186,7 +184,7 @@ ai-agent-java/                         Maven 父工程 (packaging=pom, groupId c
 | `agent.execution` | `max-concurrent`(4) `default-timeout-seconds`(120) `max-timeout-seconds`(900) `lease-seconds`(90) `lease-reap-seconds`(30) `max-attempts`(2) `poll-interval-ms` `claim-peek` `max-queued-tasks`(1000) |
 | `agent.tools.*` | 自定义工具按 provider 名开关（默认开）+ 框架内置 `shell/read-file/write-file/todo` + `working-dir` `shell-allowed-commands` `delete-workspace-on-finish` |
 | `agent.pdfs` | `enabled` `pages-per-call` `concurrency` `ocr-parallelism` `understand-parallelism` `max-pages` `max-image-dimension` `jpeg-quality` `timeout-seconds` `max-download-bytes` `text-chunk-size` `text-chunk-overlap` `ssrf-allowlist` |
-| `agent.ips` | 综合服务平台三个接口（OCR / 印章 / 发票）：`enabled` `base-url` `timeout-seconds`（印章/发票） `ocr-timeout-seconds` `rasterize-dpi` `max-image-dimension` `jpeg-quality` `resize` `use-cls` `format` `app-id` |
+| `agent.ips` | 综合服务平台，Java 侧只剩 OCR：`enabled` `base-url` `ocr-timeout-seconds` `rasterize-dpi` `max-image-dimension` `jpeg-quality` `resize` `use-cls` `format` `app-id`。印章/发票走镜像内置 `ips` CLI，其超时是 OS 变量 `IPS_TIMEOUT_SECONDS`（不在 Spring 配置里） |
 | `agent.skills` | `enabled` `directory` `classpath-location` `code-execution-enabled` `max-requested` `max-inline-chars` |
 
 数据源：`serverTimezone=Asia/Shanghai`（见 §5 时间说明）。
@@ -208,7 +206,7 @@ ai-agent-java/                         Maven 父工程 (packaging=pom, groupId c
 
 - **权限模式**：默认 `BYPASS`，且框架内置 shell / 读写文件默认开启——但文件与 shell 的**工作目录被沙箱到该任务私有目录** `<working-dir>/<taskId>`，AgentScope 在执行期强制，越界拒绝。等于"沙箱内的远程命令执行"。
 - **硬化手段**：收紧 `agent.tools.*`（关 shell/写文件）、把 `permission-mode` 调到 `EXPLORE`/更严格、配 `shell-allowed-commands` 白名单、`delete-workspace-on-finish` 控制产物留存。
-- **shell 的实际风险不止「能跑命令」**：框架的 shell 工具对输出没有上限，模型 `curl` 一个大文件到 stdout 就等于把整个文件读进主模型上下文（实测 30MB PDF ≈ 13.7 万字符，直接撑爆并耗尽 max-iters）；白名单只按可执行文件名拦，拦不住这种输出。加上文档工具已能直接吃 URL，curl 没有正当用途，生产与测试环境均置 `AGENT_TOOL_SHELL=false`。
+- **shell 的实际风险不止「能跑命令」**：框架的 shell 工具对输出没有上限，模型 `curl` 一个大文件到 stdout 就等于把整个文件读进主模型上下文（实测 30MB PDF ≈ 13.7 万字符，直接撑爆并耗尽 max-iters）；白名单只按可执行文件名拦，拦不住这种输出。文档工具又不再吃 URL（文件在任务启动前已就绪在 `src/` 下），curl 没有任何正当用途，生产与测试环境均置 `AGENT_TOOL_SHELL=false`。
 - **本地文件入参**：`SandboxPaths` 严格限制在任务沙箱内，越界拒绝；本地源文件不删除。
 - **鉴权**：本服务**不含鉴权**（API Key/mTLS 由上游网关负责，接口对外前必须前置鉴权）。
 - **注入面**：`outputSchema`/`skills` 会进 prompt，提交时校验（技能名白名单正则、数量与注入字符上限；未安装的技能名忽略并记 WARN，不报错）。
@@ -235,14 +233,21 @@ AgentScope 2.0.3 自带 `io.agentscope.core.skill`，格式与 Claude/pi skills 
 
 **纯文本子调用不用视觉端点（`agent.text-model`）**：图片/PDF 一旦 OCR 成 txt，抽取和 QA 手上就只剩文本，此时调的是 `agent.vision` 那个 VL 模型，纯属将就。实测同一份营业执照的 OCR 文本（680 字符、单块、`temperature=0`）：字段列表给 6 个时稳定漏掉 `成立日期`（文本里明写 `成立日期 1989年09月09日`），只给 3 个就正常；同一提示词换成文本模型 `pro` 则 6/6 全对。所以 `askTextOnly` 默认改走 `agent.text-model`（默认 `pro`），只有真带图的请求才去视觉端点。
 
-**工具幂等（4 个文档/识别工具共用一份调用台账）**：模型会在一次任务里把同一个来源反复喂给同一个工具
-（实测 `recognize_seal` 连调 4 次、`understand_document` 连调 5 次），每次都是真实的 IPS/模型调用，而结论不会变。
+**工具幂等（2 个文档工具共用一份调用台账）**：模型会在一次任务里把同一个来源反复喂给同一个工具
+（实测印章工具连调 4 次、`understand_document` 连调 5 次；印章工具现已撤下，见 §12），每次都是真实的 IPS/模型调用，而结论不会变。
 台账落在任务目录 `.ocr/calls.json`：key＝工具名＋归一化参数，命中就直接返回上次的返回；失败不存结果（可重试）但照样计数，
 否则模型对着一个一直失败的来源会无限重试；
-seal/invoice/understand 另有「一次任务最多真跑 4 次」的硬闸。台账只存结构化结论（≤32000 字符），不存全文、
+understand 另有「一次任务最多真跑 4 次」的硬闸，extract 有「同一来源最多 3 次」。台账只存结构化结论（≤32000 字符），不存全文、
 不常驻内存，随任务目录一起删——它是重复调用闸，不是内容缓存。`get_system_time` 不参与。
 
-**印章/发票为什么不再是「curl 技能」**：这两个接口只吃 multipart 文件、不吃 URL，技能里的 curl 示例会逼模型先 `curl -o` 把文件下载进工作目录，于是同一份内容出现「URL」和「本地副本」两个身份（按来源做的去重必然失效），模型还会把没拿到值的印章字段丢回 `extract_document_fields` 去补——实测为 1 个字段把 72 页重新 OCR 一遍、87s 后撞超时。现在调用与下载都在内置工具 `recognize_seal` / `recognize_invoice` 里，参数、返回结构、字段别名和「什么算权威结论」全部写进工具描述，两个 SKILL.md 已删除——调用方在 instruction 里直接点名工具即可。
+****印章/发票：工具 → 技能 → 又回到技能（这次成立）**：这条路径来回过一次，值得记清楚。
+第一轮撤技能是因为技能正文会逼模型先 `curl -o` 下载文件，同一份内容出现「URL」和「本地副本」两个身份，
+去重必然失效（实测为 1 个字段把 72 页重新 OCR 一遍、87s 撞超时），于是改成内置工具。
+现在重新做成技能（`seal-recognition` / `invoice-recognition`，随 jar 内置）并删掉 Java 工具，前提条件已经变了：
+§11 的 `SourceIngestor` 在任务启动前就把指令里的文件 URL 下载到 `src/` 并原地改写指令，工具与 CLI 都只吃本地路径，
+`curl`/`wget` 也被命令黑名单直接拒——「两个身份」这个坑的成因被拆掉了。同时 `ips 1.0.4` 修好了 `seal` 不请求
+`return_ocr_text` 的 bug（旧版 `ocr_result` 恒为空串，读不出公司名，这才是当初必须用 Java 工具的真实原因）。
+收益是少一套口径：IPS 的字段名、错误文案、缓存行为只有一份，不会再出现「CLI 与工具结论不一致」。
 上传侧也不整份读进内存：请求体先落到任务的 `.ocr/` 沙箱再用 `BodyPublishers.ofFile` 流式发送，
 堆占用与文件大小无关（之前 `readAllBytes` + `ByteArrayOutputStream` + `toByteArray()` 三次完整副本，
 一份 200MB 的 PDF 单次调用就能吃掉 600MB 堆）。SSRF 主机白名单也统一到 `SourceFiles.validateUrl`，
@@ -250,9 +255,125 @@ OCR 转文本、印章、发票、PDF 理解四条抓取通道都过它。
 
 ---
 
+## 11. 文件来源预处理（URL → 本地文件）
+
+指令里只会给 URL，而每条工具路径（OCR 转文本、印章、发票、PDF 理解、TXT 抽取）都要先把来源落地成文件。
+之前是**每条路径各自下载**：一份 30MB 扫描件在一个「抽取 + 印章」的混合任务里被下载 3-4 遍，光下载 90s+；
+模型自己 `curl -o` 落盘更糟——同一份内容出现「URL」和「本地副本」两个身份，按来源做的去重全部失效。
+
+现在下载只发生一次，在 agent 启动之前（`SourceIngestor`，`ai-agent-app/runtime`）：
+
+1. 扫指令里的 URL，只认扩展名白名单（pdf/jpg/jpeg/png/webp/gif/bmp/txt），按出现顺序去重；
+   中文标点与 CJK 不算 URL 的一部分（「…pdf，抽取字段」必须在这里断开，否则逗号进 URL 必 404）。
+2. 串行下载到 `<taskDir>/src/<序号>-<清洗后的文件名>`（保留中文、过滤非法字符、主干截 60 字符、扩展名小写）。
+3. 写 `<taskDir>/.ingest/manifest.json`（url / path / bytes / sha256），事后能查「这个文件是从哪个 URL 来的」。
+4. 指令里的 URL 原地换成 `src/...`，末尾追加一行就绪说明；喂给模型的是改写后的指令。
+
+配套约束：
+
+- **工具硬拒绝 URL**：`SourceFiles.fetch`、`MediaInputs`、`PdfService`、`TextService` 收到 URL 直接返回可执行错误
+  （提示改用 `src/` 下的路径）。`PdfService`/`TextService`/`VisionClient` 里那三份重复的下载实现已删除，
+  全工程只剩 `SourceFiles.download` 一处，且只由 `SourceIngestor` 调用。
+- **抓不到文件就快速失败**：不启动 agent，`error.code=SOURCE_UNAVAILABLE`；4xx/超体积/空文件不重试，
+  5xx/超时/网络错误可重试。
+- **「必须调工具」的守卫仍按原始指令判定**：改写后的指令里已经没有 URL，若用改写后的文本判定，
+  `DOCUMENT_REFERENCE` 会失效，模型凭记忆编字段那条防线就没了。
+- **清理只有一个开关**：`agent.tools.delete-workspace-on-finish=true` 时整个任务目录（`src/`、`.ocr/`、
+  `.ingest/`）一起删；false 时一律不删。之前「false 也要删 `.ocr/`」的额外逻辑已去掉——测试环境要的就是
+  「跑完能进去看」，生产保持 true，否则每份扫描件在盘上留几十 MB 只涨不缩。
+
+---
+
 ## 10. 构建与部署
 
 - 编译：`mvn clean package`（根 reactor）→ `ai-agent-app/target/ai-agent-java-<version>.jar`（fat jar，`core`/`tools` 内嵌 `BOOT-INF/lib`，`Start-Class=com.jtzj.agent.AgentApplication`）。
 - 镜像分层：`Dockerfile.base`（环境层：JDK+Python+poppler）与 `Dockerfile`（应用层 `FROM base` + COPY jar）拆分，日常改代码只重建应用层（秒级）。
+- 应用层除 jar 外还 COPY `cli-tools/` 到 `/opt/agent-cli` 并加入 PATH（见 §12）；CLI 二进制跟仓库一起发牌，不该触发基础镜像重建。
 - 部署：`BUILD=1 IMAGE=ai-agent-java:<ver> bash scripts/deploy-remote.sh`（编译 → 导出 tar → scp → 远端后台 load+run → 轮询健康）。`deploy-remote.sh` 含内网地址，**不入库**。
 - Jackson 两套并存：模型用 Jackson 3（`tools.jackson`，Spring Boot 4 反序列化请求体），服务与 AgentScope 用 Jackson 2（`com.fasterxml`，bean 名 `agentScopeObjectMapper`）。
+
+---
+
+## 12. 镜像内置 CLI（`cli-tools/`）
+
+`cli-tools/` 里放的是随应用一起发牌的静态二进制，打进镜像后位于 `/opt/agent-cli`（已加入 `PATH`），
+agent 用 `execute_shell_command` 直接调。目前只有 `ips`（Rust/musl static-pie，不依赖 glibc，
+在 `eclipse-temurin:17-jre-noble` 与 alpine 上均实测可跑，仅 x86-64）。
+
+**为什么走 CLI 而不是再写一套内置工具**：IPS 有七类接口（idcard / bizlic / invoice / seal / ocr / card / handprint），
+逐个做成内置工具就要再写七套 provider、响应解析、幂等。CLI 已经把 multipart 契约、错误信息、
+结果缓存封装完成，新增一类能力只需换个子命令，零 Java 代码。
+
+**契约（实测 `ips 1.0.5`）**
+
+- 子命令：`ips <idcard|bizlic|invoice|seal|ocr|card|handprint> <文件> [--init-confidence F] [--timeout 秒] [--no-cache]`；
+  `<文件>` 允许本地路径或 http(s) URL。标准输出就是接口原始 JSON（无包裹）。`--timeout` 是全局选项，
+  默认 **180s**（`1.0.4` 及以前是 30s，多页 PDF 不够用，`1.0.5` 改的）。
+- 失败：退出码 1，打印 `错误: 文件不存在: ...` / `错误: 下载失败: ... (HTTP 404)`。
+- 环境变量：`IPS_BASE_URL`（必填，启动时缺失直接报错）、`IPS_CACHE_DIR`（默认 `$HOME/.ips/cache`）。
+- 缓存：按「接口+来源」做 sha256 key，写单个 `.json`；命中时 ~0.1s。同一文件带不同查询串会存两份。
+
+**边界（决定哪些该用它、哪些不该）**
+
+- `ips seal` 从 `1.0.4` 起会请求 `return_ocr_text`：`ocr_result` 就是印章上的公司名（实测 `seal_1.jpg` →
+  `重庆冠华建筑工程设备租赁有限公司`）。旧版恒为空串、读不出公司名——那才是当初必须写 Java 工具的真实原因，
+  不是设计偏好。`ips invoice` 的 `ocr_text` 是**一个 JSON 字符串**（发票号码/购货方公司名称/发票总金额…要再解析一层）。
+  两者图片和 PDF 都吃；不是中国增值税发票时接口回 400 + 纯文本「未检测到有效发票」，CLI 退出码 1、stdout 空——
+  这是「不是发票」的权威结论，不是格式错误（英文 ACME 商业 invoice 就是这个返回）。
+- `ips idcard` / `ips bizlic` 走 `/api/v3/{idcard,bizlic}/preprocess`，**只收图片**（v3 路由里只有
+  `ocr` / `seal` / `invoice` 做了 PDF 分支），传 PDF 会失败。返回**恰好 1 个元素**，`ocr_text` 同样是
+  JSON 字符串（身份证：姓名/性别/民族/出生/住址/公民身份号码/签发机关/有效期限；营业执照：社会统一信用代码/
+  企业名称/类型/法定代表人/注册资本/成立日期/营业期限/住所/经营范围）。`idcard_type` 与 `bizlic_type` 都恒 1
+  （检测模型不区分正反面/版本，只是证件类别），`corp_image_base64` 恒 null（CLI 固定 `return_corp_image=false`）。
+  没检出时不返回空数组而是 400 +「未检测到有效身份证.」/「未检测到有效营业执照.」，退出码 1、stdout 空——
+  同样是终局结论。服务端阈值默认 idcard 0.5、bizlic 0.8，CLI 不显式传就用服务端默认值。
+  实测 `bizlic.jpg`（1.2MB）<1s：`bizlic_type=1`、`企业名称=中国交通物资有限公司`、
+  `社会统一信用代码=91110000102027271X`、`注册资本=173443.17万元`、`经营范围=""`；同一张图喂 `ips idcard`
+  → 退出码 1 +「未检测到有效身份证.」。
+- **升级 CLI 必须清 `IPS_CACHE_DIR`**：缓存 key 只含「接口+来源」，不含 CLI 版本，旧版写过的 seal 条目
+  （`ocr_result` 是空串）会被继续命中。
+- `ips ocr` 能一把吃整份 PDF（服务端逐页，输出用 `--- 分页符 ---` 隔开），但它的输出会原样进主模型上下文；
+  抽取类任务一律用 `extract_document_fields`（全文只落在任务目录的文本文件里，不进上下文）。
+- 管道可用但受白名单约束：`DenyListCommandValidator` 按 `; | & 换行` 逐段判首个可执行文件，所以
+  `ips seal src/x.jpg | head -c 500` 会因为 `head` 不在 `AGENT_SHELL_ALLOWED` 里被拒。直接读 JSON 输出最省事。
+- CLI 虽然支持 URL，但工具层已经去远程化（§11）：指令里的 URL 会被改写成 `src/...`，因此也只给 CLI 传本地路径。
+
+**接线**
+
+- `Dockerfile`：`COPY cli-tools/ /opt/agent-cli/` + `chmod -R a+rX`，构建期跑 `ips --version` 与 `ips seal --help`
+  （架构不对当场失败），再单独断言 `ips ocr` 退出码必须是 3（包装层没生效就构建失败），
+  最后 `ENV PATH="/opt/agent-cli:${PATH}"`。
+- **`cli-tools/ips` 是 sh 包装脚本，真二进制在 `cli-tools/native/ips`**（不在 PATH 上）。包装层只做一件事：
+  按 `IPS_ALLOWED_SUBCOMMANDS`（默认 `idcard,bizlic,invoice,seal,card,handprint`，**不含 `ocr`**）放行子命令。
+  为什么必须在这一层判：框架的 `UnixCommandValidator` 只比对命令的第一个 token，比对不到 `ips` 后面的子命令。
+  退出码约定 `0` 成功 / `1` CLI 运行错误 / `2` clap 参数错误 / `3` 策略拒绝（刻意与 2 区分）。
+  默认黑名单里的 `/opt/agent-cli/native/ips` 就是堵「模型用绝对路径直调未包装二进制、绕过子命令白名单」这条路；
+  运维若自定义 `AGENT_SHELL_DENIED` 又漏掉这条，这个口子会重新打开。仍不做进程级隔离。
+- **命令校验 `DenyListCommandValidator`**：框架自带的白名单在**非空时**会连带拒掉所有含 `& | ;` 与换行的
+  命令（它只比对整条命令的第一个 token），混合任务就没法用，所以白名单非空时改由本类逐段判——按 `; | & 换行`
+  拆段，每段首个 token（去引号、去路径、去脚本后缀、小写）都必须在 `agent.tools.shell-allowed-commands` 里，
+  管道与组合命令因此照常可用；`./x` 仍走框架的「不得越出当前目录」检查，`../x` 直接拒。
+  黑名单 `agent.tools.shell-denied-commands`（默认 `curl,wget,/opt/agent-cli/native/ips`）先于白名单判，
+  条目两种写法：裸名按 basename 命中（`curl`、`/usr/bin/curl`、`"curl"` 都算），带路径的按路径后缀命中
+  （`native/ips` 用来堵「白名单只写 `ips`、模型用绝对路径直调未包装二进制」）。被拒的命令不执行，模型收到
+  `SecurityError: ...`，会据此改用工具或 `src/` 里的本地文件。
+  要让 shell 除 `ips` 外读不到本地文件就配 `AGENT_SHELL_ALLOWED=ips`；文件工具是另一个开关（`AGENT_TOOL_READ`）。
+  已知边界：白名单只看每段的**可执行文件**，不看参数，所以 `ips seal src/x.jpg > /tmp/o.txt` 这种重定向目标
+  不在管控内（写比读危害小，且要堵就得解析重定向，代价不值）。真要硬隔离得靠容器文件系统权限，不在这一层。
+- `scripts/docker-run.sh`：注入 `IPS_BASE_URL`（未显式给出时从同一个 `.env` 取 `AGENT_IPS_BASE_URL`，避免两处漂移）
+  和 `IPS_CACHE_DIR=/workspace/.ips-cache`（在任务目录之外，不受 `delete-workspace-on-finish` 影响，跨任务复用）；
+  启动后打印容器内 `ips --version` 做冒烟。
+  取值优先级是 **shell 环境变量 > `.env` 同名键 > 脚本默认**（`pick`/`env_from_file` 两个函数），所以
+  `IPS_BASE_URL` / `IPS_CACHE_DIR` / `IPS_TIMEOUT_SECONDS` / `IPS_ALLOWED_SUBCOMMANDS` 都可以直接写在 `.env` 里，
+  不必再导 shell 变量；`IPS_ALLOWED_SUBCOMMANDS` 只在显式给出时注入，否则留给包装脚本用自己的默认。
+  注意 `--env-file` 在 `-e` 之前，脚本这里再解析一遍并显式 `-e`，是为了让「`.env` 里写的值」一定赢过脚本默认。
+- **sys-prompt 里不提 CLI**：早期有一份 `agent.runner.cli-hint` 在提示词里列可用子命令，已删除且不留开关。
+  命令用法只写在技能正文（`skills/{seal,invoice,idcard,bizlic}-recognition`）里——两处写同一件事必然漂移。
+- 超时：`ips 1.0.5` 起 CLI 自带 `--timeout` 默认 180s，包装脚本**不再补默认值**（早先它补 120 是为了救
+  1.0.4 的 30s，现在留着反而会把 180 降级）。只有 `IPS_TIMEOUT_SECONDS` 显式给出时才追加 `--timeout`，
+  `scripts/docker-run.sh` 默认从 `.env` 的 `AGENT_IPS_TIMEOUT` 注入——这就是被删掉的 `agent.ips.timeout-seconds`
+  的新落点：Java 侧不再持有这个键，但两边超时仍同源。调用方显式写 `--timeout` 一律优先。
+- 配了 `AGENT_SHELL_ALLOWED` 时要把 `ips` 加进白名单（否则 §6.2 的技能全跑不起来）；白名单为空则不限可执行文件。
+  反过来，`AGENT_SHELL_ALLOWED=ips` 就是「shell 除 ips 外不能读本地文件」的配法，见上面校验器那条。
+
+缓存只增不减，需要时清理：`docker exec ai-agent-java find /workspace/.ips-cache -mtime +30 -delete`。

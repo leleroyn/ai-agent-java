@@ -35,8 +35,8 @@ import org.slf4j.LoggerFactory;
  *
  * <p><b>一次任务内同一份内容只 OCR 一次</b>：换一批字段再抽时，直接复用磁盘上已识别好的那份 txt
  * （实测模型常先抽 5 个字段、再补抽 1 个，不复用就会把 72 页重新识别一遍）。txt 不进主模型上下文——
- * 返回值里只有归并后的字段值，且部署侧关掉 read-file、shell 只留 curl；整次任务跑完由
- * {@code AgentTaskRunner} 删掉 {@code .ocr/}。
+ * 返回值里只有归并后的字段值，且部署侧关掉 read-file 和 shell。跑完只在
+ * {@code agent.tools.delete-workspace-on-finish=true} 时随整个任务目录一起清掉。
  *
  * <p><b>不做内存缓存</b>：去重靠磁盘上那份 txt（{@link OcrTextService} 按内容哈希命名，文件已存在
  * 就直接复用），工具实例里不留任何全文或结果副本——几十 MB 的扫描件文本不该压在堆上。
@@ -88,7 +88,8 @@ public class DocumentExtractTools {
     public ToolResultBlock extractFields(
             @ToolParam(
                     name = "source",
-                    description = "文档来源，一个或多个，空格或换行分隔。每项是 http/https URL 或本任务工作目录下的本地文件路径（可混用）。"
+                    description = "文档来源，一个或多个，空格或换行分隔。每项必须是本任务工作目录下的文件路径"
+                            + "（指令里点名的文件已在任务启动前就绪在 src/ 下，直接用指令里给的路径）。不接受 URL。"
                             + "按扩展名判定类型：图片(.jpg/.png/.webp/.gif/.bmp)、PDF(.pdf)、TXT(.txt)。",
                     required = true)
             String source,

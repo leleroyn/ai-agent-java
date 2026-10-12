@@ -15,6 +15,8 @@ public final class ErrorCodes {
     public static final String INVALID_REQUEST = "INVALID_REQUEST";
     /** Queue full and the caller asked for immediate admission instead of queueing. */
     public static final String CONCURRENCY_LIMITED = "CONCURRENCY_LIMITED";
+    /** A file URL named in the instruction could not be fetched before the agent started. */
+    public static final String SOURCE_UNAVAILABLE = "SOURCE_UNAVAILABLE";
 
     private ErrorCodes() {
     }

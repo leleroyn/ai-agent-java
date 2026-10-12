@@ -2,7 +2,7 @@
 # docker.io 拉 dockerfile frontend，而本机构建环境访问不了 auth.docker.io（实测超时），
 # 用内置 frontend 即可——本文件用到的 ARG/COPY/HEALTHCHECK/ENTRYPOINT 均属内置支持。
 #
-# ai-agent-java 应用镜像：只负责放 jar。运行环境（JDK17 + Python3 + shell 工具集 + 运行用户）
+# ai-agent-java 应用镜像：放 jar + 仓库自带的 CLI 二进制。运行环境（JDK17 + Python3 + shell 工具集 + 运行用户）
 # 来自基础镜像 ai-agent-base（见 Dockerfile.base）。因此本构建不跑 apt、只叠一层 jar，秒级完成。
 #
 # 构建（推荐用脚本，会自动带版本号；本机 Maven 编译 jar）：
@@ -33,6 +33,30 @@ ARG JAR_FILE=ai-agent-app/target/ai-agent-java-1.2.0.jar
 
 # jar 属 root:root、权限 644：appuser 能读、能执行，但改不了自己跑的 jar。
 COPY ${JAR_FILE} /app/app.jar
+
+# ---------- agent 可调用的 CLI 工具（cli-tools/） ----------
+# 随应用一起发版的静态二进制（Rust/musl static-pie，不依赖 glibc；实测在 eclipse-temurin:17-jre-noble
+# 上直接跑）+ 一层 sh 包装脚本。agent 的 shell 工具就在本容器内执行，包装脚本进 PATH 就能被
+# `ips <子命令> <文件>` 调起；真二进制在 native/ 下、不在 PATH 上，由包装脚本按 IPS_ALLOWED_SUBCOMMANDS
+# 决定放行哪些子命令（框架的 shell 白名单只比对命令的第一个 token，判不到子命令，只能在这一层判）。
+#
+# 为什么放应用镜像而不是基础镜像：这些二进制跟仓库一起演进、换版本是常事，放应用层只重建这一层（秒级）；
+# 基础镜像重建要跑 apt（外网 + 分钟级），不该被 CLI 版本变更触发。
+COPY cli-tools/ /opt/agent-cli/
+# Windows 宿主机上 COPY 进来的可执行位不可靠，显式补权限；紧接着跑一次 --version 当构建期冒烟测试——
+# 架构/ABI 不匹配（例如在 arm64 机器上构建 x86 二进制）当场构建失败，而不是等线上 agent 调它才发现。
+RUN chmod -R a+rX /opt/agent-cli \
+    && /opt/agent-cli/ips --version >/dev/null \
+    && /opt/agent-cli/ips seal --help >/dev/null
+# 白名单冒烟：默认配置下 `ips ocr` 必须被包装脚本拒掉（退出码 3）。构建期就挡住「包装层没生效」
+# 这种事故，否则线上会变成模型能在 shell 里 OCR 整篇 72 页原文、把主上下文灌爆。
+RUN /opt/agent-cli/ips ocr probe-nonexistent >/dev/null 2>&1; [ "$?" -eq 3 ]
+# 全局选项冒烟：ips --timeout 5 seal <不存在文件> 必须走到真二进制（退出码 1），不能被白名单误拒（3）。
+# clap 的全局选项可以写在任意位置，包装器定位子命令时必须跳过它们，否则模型这样写会被误判成「没开放」。
+RUN /opt/agent-cli/ips --timeout 5 seal probe-nonexistent >/dev/null 2>&1; [ "$?" -eq 1 ]
+
+# /opt/agent-cli 进 PATH：agent 写 `ips bizlic src/x.jpg` 即可，不必记绝对路径。
+ENV PATH="/opt/agent-cli:${PATH}"
 
 # /workspace 是 agent 的工作根目录（AGENT_WORKING_DIR 默认指向这里），基础镜像已建好并设为 WORKDIR。
 WORKDIR /workspace

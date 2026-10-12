@@ -4,15 +4,10 @@ import com.jtzj.agent.core.config.AgentProperties;
 import com.jtzj.agent.core.support.Extraction;
 import com.jtzj.agent.core.support.QaMerge;
 import com.jtzj.agent.core.support.SandboxPaths;
+import com.jtzj.agent.core.support.SourceFiles;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -43,7 +38,6 @@ public class TextService {
     private final AgentProperties props;
     private final ObjectMapper mapper;
     private final VisionClient visionClient;
-    private final HttpClient http;
 
     public TextService(AgentProperties props,
                        @Qualifier("agentScopeObjectMapper") ObjectMapper mapper,
@@ -51,10 +45,6 @@ public class TextService {
         this.props = props;
         this.mapper = mapper;
         this.visionClient = visionClient;
-        this.http = HttpClient.newBuilder()
-                .connectTimeout(java.time.Duration.ofSeconds(20))
-                .followRedirects(HttpClient.Redirect.NORMAL)
-                .build();
     }
 
     /**
@@ -69,25 +59,20 @@ public class TextService {
         if (fields.isEmpty()) {
             return "Error: fields 为空，请指定要抽取的字段。";
         }
+        if (isHttpUrl(txtSource)) {
+            return "Error: " + SourceFiles.URL_REJECTED;
+        }
         try {
-            Path file = resolveSource(txtSource, cfg, taskDir);
+            Path file = resolveSource(txtSource, taskDir);
             if (file == null) {
-                return "Error: 本地文档路径必须在任务工作目录内且存在：" + txtSource;
+                return "Error: 本地文档路径必须在任务工作目录内且存在：" + txtSource
+                        + "（指令里点名的文件应已就绪在 src/ 下）";
             }
-            boolean downloaded = isHttpUrl(txtSource);
             long fileSize = Files.size(file);
             if (fileSize > cfg.getMaxDownloadBytes()) {
-                if (downloaded) Files.deleteIfExists(file);
                 return "Error: 文件体积 " + fileSize + " 字节超过上限 " + cfg.getMaxDownloadBytes();
             }
-            String content;
-            try {
-                content = Files.readString(file, StandardCharsets.UTF_8);
-            } finally {
-                if (downloaded) {
-                    Files.deleteIfExists(file);
-                }
-            }
+            String content = Files.readString(file, StandardCharsets.UTF_8);
             if (content.isBlank()) {
                 return "Error: 文件内容为空。";
             }
@@ -147,25 +132,20 @@ public class TextService {
         if (!props.getVision().isEnabled()) {
             return "Error: 视觉功能未启用（agent.vision.enabled=false），无法处理文档。";
         }
+        if (isHttpUrl(txtSource)) {
+            return "Error: " + SourceFiles.URL_REJECTED;
+        }
         try {
-            Path file = resolveSource(txtSource, cfg, taskDir);
+            Path file = resolveSource(txtSource, taskDir);
             if (file == null) {
-                return "Error: 本地文档路径必须在任务工作目录内且存在：" + txtSource;
+                return "Error: 本地文档路径必须在任务工作目录内且存在：" + txtSource
+                        + "（指令里点名的文件应已就绪在 src/ 下）";
             }
-            boolean downloaded = isHttpUrl(txtSource);
             long fileSize = Files.size(file);
             if (fileSize > cfg.getMaxDownloadBytes()) {
-                if (downloaded) Files.deleteIfExists(file);
                 return "Error: 文件体积 " + fileSize + " 字节超过上限 " + cfg.getMaxDownloadBytes();
             }
-            String content;
-            try {
-                content = Files.readString(file, StandardCharsets.UTF_8);
-            } finally {
-                if (downloaded) {
-                    Files.deleteIfExists(file);
-                }
-            }
+            String content = Files.readString(file, StandardCharsets.UTF_8);
             if (content.isBlank()) {
                 return "Error: 文件内容为空。";
             }
@@ -322,49 +302,13 @@ public class TextService {
         return out;
     }
 
-    private Path resolveSource(String source, AgentProperties.Pdfs cfg, Path taskDir) throws Exception {
-        if (isHttpUrl(source)) {
-            URI uri = URI.create(source.trim());
-            String scheme = uri.getScheme();
-            if (scheme == null || !(scheme.equalsIgnoreCase("http") || scheme.equalsIgnoreCase("https"))) {
-                throw new IllegalArgumentException("URL 必须是 http/https，收到：" + source);
-            }
-            return download(uri, taskDir, cfg.getMaxDownloadBytes());
-        }
+    /** 本地→沙箱内校验。URL 已在入口拒绝。 */
+    private Path resolveSource(String source, Path taskDir) {
         Path local = SandboxPaths.resolveWithin(taskDir, source);
         if (local == null || !Files.isRegularFile(local)) {
             return null;
         }
         return local;
-    }
-
-    private Path download(URI uri, Path taskDir, int maxBytes) throws Exception {
-        Path target = taskDir.resolve("source.txt");
-        HttpRequest req = HttpRequest.newBuilder(uri)
-                .timeout(java.time.Duration.ofSeconds(120))
-                .GET().build();
-        HttpResponse<InputStream> resp = http.send(req, HttpResponse.BodyHandlers.ofInputStream());
-        if (resp.statusCode() / 100 != 2) {
-            throw new IllegalStateException("下载文件失败 HTTP " + resp.statusCode());
-        }
-        long total = 0;
-        try (InputStream in = resp.body(); OutputStream os = Files.newOutputStream(target)) {
-            byte[] buf = new byte[64 * 1024];
-            int n;
-            while ((n = in.read(buf)) > 0) {
-                total += n;
-                if (total > maxBytes) {
-                    Files.deleteIfExists(target);
-                    throw new IllegalStateException("文件超过体积上限 " + maxBytes + " 字节");
-                }
-                os.write(buf, 0, n);
-            }
-        }
-        if (total == 0) {
-            Files.deleteIfExists(target);
-            throw new IllegalStateException("下载到的文件为空");
-        }
-        return target;
     }
 
     private static boolean isHttpUrl(String s) {

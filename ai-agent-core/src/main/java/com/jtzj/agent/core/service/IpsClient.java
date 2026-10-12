@@ -12,8 +12,6 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -23,20 +21,18 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 /**
- * 综合服务平台（IPS）客户端，一个类管它的三个接口：
+ * 综合服务平台（IPS）客户端。
  *
- * <ul>
- *   <li>{@code POST /api/v3/ocr/preprocess}      {@link #ocr} —— 抽取类任务的统一文本通道</li>
- *   <li>{@code POST /api/v3/seal/preprocess}     {@link #seal} —— 内置工具 {@code recognize_seal}</li>
- *   <li>{@code POST /api/v3/invoice/preprocess}  {@link #invoice} —— 内置工具 {@code recognize_invoice}</li>
- * </ul>
+ * <p>本类只保留 {@code POST /api/v3/ocr/preprocess}（{@link #ocr}）——抽取类任务的统一文本通道。
+ * 印章 / 发票两个接口不再由 Java 侧封装：它们改由镜像内置的 {@code ips} CLI 调用
+ * （见 DESIGN §12 与内置技能 seal-recognition / invoice-recognition），少一套口径才不会再漂移。
  *
  * <p>三个接口本来就是同一台服务的同一族 API（multipart 上传文件、按魔数判类型），所以配置、
  * 基址、开关、multipart 组装全部收在一处：{@code agent.ips.*}。之前 OCR 单独一个
  * {@code agent.ocr} 块，等于同一台服务配两遍。
  *
  * <p>与 {@link VisionClient} 一致：失败返回 {@code "Error: ..."} 文本而不是抛异常，调用方才能
- * 按页失败处理或按来源汇总。注意印章/发票的<b>错误响应是纯文本不是 JSON</b>（发票检测不到时
+ * 按页失败处理。注意 IPS 的<b>错误响应是纯文本不是 JSON</b>（发票接口检测不到时
  * 回 400 + "未检测到有效发票"），所以非 2xx 时直接把响应体当错误原因带回去。
  */
 @Component
@@ -44,8 +40,6 @@ public class IpsClient {
 
     private static final Logger log = LoggerFactory.getLogger(IpsClient.class);
     private static final String OCR_PATH = "/api/v3/ocr/preprocess";
-    private static final String SEAL_PATH = "/api/v3/seal/preprocess";
-    private static final String INVOICE_PATH = "/api/v3/invoice/preprocess";
 
     private final AgentProperties props;
     private final ObjectMapper mapper;
@@ -110,41 +104,6 @@ public class IpsClient {
         return text;
     }
 
-    /**
-     * 印章识别。响应是 JSON 数组，每个印章一个元素（空数组=未检出，不是错误）。
-     *
-     * @param returnOcrText  是否返回印章上的公司名（false 时明显更快，但只有置信度和类型）
-     * @param initConfidence 检测阈值 0~1，{@code null}=用服务端默认 0.5
-     * @return 成功返回响应体原文（JSON 数组文本）；失败返回 {@code "Error: ..."}
-     */
-    public String seal(Path file, String filename, boolean returnOcrText, Double initConfidence) {
-        Map<String, String> fields = new LinkedHashMap<>();
-        fields.put("return_ocr_text", String.valueOf(returnOcrText));
-        // 固定不取印章裁剪图：base64 体积大、对文本输出无用，还会占满主模型上下文。
-        fields.put("return_seal_image", "false");
-        if (initConfidence != null) {
-            fields.put("init_confidence", String.valueOf(initConfidence));
-        }
-        return post(SEAL_PATH, file, filename, fields, props.getIps().getTimeoutSeconds(), "印章");
-    }
-
-    /**
-     * 发票识别。响应是<b>最多 1 个元素</b>的 JSON 数组，字段在 {@code ocr_text} 里（是个 JSON 字符串）。
-     *
-     * @param returnOcrText  是否返回发票内容字段（图片输入恒有值；只对文字版 PDF 生效）
-     * @param initConfidence 检测阈值 0~1，{@code null}=用服务端默认 0.5
-     */
-    public String invoice(Path file, String filename, boolean returnOcrText, Double initConfidence) {
-        Map<String, String> fields = new LinkedHashMap<>();
-        fields.put("return_ocr_text", String.valueOf(returnOcrText));
-        // 固定不取企业头像裁剪图：base64 体积大、对字段抽取无用，只会占满主模型上下文。
-        fields.put("return_corp_image", "false");
-        if (initConfidence != null) {
-            fields.put("init_confidence", String.valueOf(initConfidence));
-        }
-        return post(INVOICE_PATH, file, filename, fields, props.getIps().getTimeoutSeconds(), "发票");
-    }
-
     /** 统一的 multipart POST（内存版，给逐页 OCR 的单页图用）。 */
     private String post(String path, byte[] fileBytes, String filename,
                         Map<String, String> fields, int timeoutSeconds, String label) {
@@ -162,50 +121,6 @@ public class IpsClient {
         byte[] body = out.toByteArray();
         return send(path, boundary, HttpRequest.BodyPublishers.ofByteArray(body),
                 body.length, filename, timeoutSeconds, label);
-    }
-
-    /**
-     * 统一的 multipart POST（流式版，给整份文件用：印章、发票）。
-     *
-     * <p>请求体先落到来源文件旁边（同一个任务 {@code .ocr/} 沙箱），再用
-     * {@link HttpRequest.BodyPublishers#ofFile} 发送：堆占用与文件大小无关，
-     * Content-Length 也是准确值（不会退化成 chunked，代理侧兼容）。之前
-     * {@code readAllBytes} + {@code ByteArrayOutputStream} + {@code toByteArray()}
-     * 三次完整副本，一份 200MB 的 PDF 单次调用就能吃掉 600MB 堆。
-     * 发完划删临时体；删不掉也只留在任务沙箱里，随任务结束一起清。
-     */
-    private String post(String path, Path file, String filename,
-                        Map<String, String> fields, int timeoutSeconds, String label) {
-        long size;
-        try {
-            size = Files.size(file);
-        } catch (Exception e) {
-            log.warn("{} stat file failed: {}", label, e.toString());
-            return "Error: 读取文件失败：" + e.getClass().getSimpleName() + ": " + e.getMessage();
-        }
-        if (size == 0) {
-            return "Error: 未提供文件字节。";
-        }
-        String boundary = newBoundary();
-        Path body = file.toAbsolutePath().getParent().resolve("mp-" + System.nanoTime() + ".part");
-        try {
-            try (OutputStream out = Files.newOutputStream(body);
-                 InputStream in = Files.newInputStream(file)) {
-                writeMultipart(out, boundary, filename, in, fields);
-            }
-            return send(path, boundary, HttpRequest.BodyPublishers.ofFile(body),
-                    size, filename, timeoutSeconds, label);
-        } catch (Exception e) {
-            log.warn("{} call failed: {}", label, e.toString());
-            return "Error: 调用" + label + "服务失败：" + e.getClass().getSimpleName()
-                    + ": " + e.getMessage();
-        } finally {
-            try {
-                Files.deleteIfExists(body);
-            } catch (Exception ignored) {
-                // 请求已经发完，删不掉就随任务沙箱一起清
-            }
-        }
     }
 
     /** 发送并处理响应：成功回响应体原文，失败回 {@code "Error: ..."}。 */

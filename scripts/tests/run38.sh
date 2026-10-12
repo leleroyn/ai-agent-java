@@ -17,7 +17,7 @@ sleep 10
 
 # 2) 两个普通异步任务排队（都很快，各约 4-13s）
 cat > c38-q1.json <<EOF
-{"taskId":"s38-q1","instruction":"用 recognize_seal 工具从 $SEAL 识别印章（不要先下载文件），取 results[].seals[].company 放入键\"公司\"。$JSON","options":{"sync":false,"timeoutSeconds":300}}
+{"taskId":"s38-q1","instruction":"用 seal-recognition 技能从 $SEAL 识别印章（不要先下载文件），取 seals[].ocr_result 放入键\"公司\"。$JSON","skills":["seal-recognition"],"options":{"sync":false,"timeoutSeconds":300}}
 EOF
 cat > c38-q2.json <<EOF
 {"taskId":"s38-q2","instruction":"读取图片 $IMG（营业执照），抽取字段：名称、注册资本。$JSON","options":{"sync":false,"timeoutSeconds":300}}
@@ -29,7 +29,7 @@ sleep 5
 
 # 3) 最后提交的 sync 任务：FIFO 下它排最后，sync 优先下它应排第一
 cat > c38-sync.json <<EOF
-{"taskId":"s38-sync","instruction":"用 recognize_seal 工具从 $SEAL 识别印章（不要先下载文件），取 results[].seals[].company 放入键\"公司\"。$JSON","options":{"sync":true,"timeoutSeconds":300}}
+{"taskId":"s38-sync","instruction":"用 seal-recognition 技能从 $SEAL 识别印章（不要先下载文件），取 seals[].ocr_result 放入键\"公司\"。$JSON","skills":["seal-recognition"],"options":{"sync":true,"timeoutSeconds":300}}
 EOF
 curl -s -X POST $API -H "Content-Type: application/json" --data @c38-sync.json > r38-sync.json &
 echo "sync submitted $(date +%T)"

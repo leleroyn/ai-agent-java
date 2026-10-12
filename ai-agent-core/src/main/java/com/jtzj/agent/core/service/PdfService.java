@@ -10,11 +10,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.InputStream;
-import java.io.OutputStream;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -59,7 +54,6 @@ public class PdfService {
     private final AgentProperties props;
     private final ObjectMapper mapper;
     private final VisionClient visionClient;
-    private final HttpClient http;
 
     public PdfService(AgentProperties props,
                       @Qualifier("agentScopeObjectMapper") ObjectMapper mapper,
@@ -67,10 +61,6 @@ public class PdfService {
         this.props = props;
         this.mapper = mapper;
         this.visionClient = visionClient;
-        this.http = HttpClient.newBuilder()
-                .connectTimeout(java.time.Duration.ofSeconds(20))
-                .followRedirects(HttpClient.Redirect.NORMAL)
-                .build();
     }
 
     /**
@@ -81,14 +71,16 @@ public class PdfService {
         if (!props.getVision().isEnabled()) {
             return "Error: 视觉功能未启用（agent.vision.enabled=false），无法理解 PDF。";
         }
+        if (isHttpUrl(pdfSource)) {
+            return "Error: " + SourceFiles.URL_REJECTED;
+        }
         Path pdf = null;
-        boolean downloaded = false;
         try {
-            pdf = resolveSource(pdfSource, cfg, taskDir);
+            pdf = resolveSource(pdfSource, taskDir);
             if (pdf == null) {
-                return "Error: 本地文档路径必须在任务工作目录内且存在：" + pdfSource;
+                return "Error: 本地文档路径必须在任务工作目录内且存在：" + pdfSource
+                        + "（指令里点名的文件应已就绪在 src/ 下）";
             }
-            downloaded = isDownloaded(pdfSource);
             int total = pageCount(pdf);
             List<int[]> segments = resolveRanges(pageRange, total);
             int pages = pagesOf(segments).size();
@@ -126,7 +118,7 @@ public class PdfService {
             log.error("pdf understand failed src={}", pdfSource, e);
             return "Error: 处理 PDF 失败：" + e.getClass().getSimpleName() + ": " + e.getMessage();
         } finally {
-            cleanup(taskDir, downloaded ? "source.pdf" : null);
+            cleanup(taskDir, null);
         }
     }
 
@@ -153,21 +145,13 @@ public class PdfService {
 
     // ---- 来源解析 / 栅格化 / 基础设施（两工具共用） ----
 
-    /** URL→下载到沙箱(source.pdf)；本地→沙箱内校验。返回文件；本地越界/不存在返回 null。 */
-    private Path resolveSource(String pdfSource, AgentProperties.Pdfs cfg, Path taskDir) throws Exception {
-        if (isHttpUrl(pdfSource)) {
-            URI uri = validateUrl(pdfSource, cfg);
-            return download(uri, taskDir, cfg.getMaxDownloadBytes());
-        }
+    /** 本地→沙箱内校验。返回文件；越界或不存在返回 null。URL 已在入口拒绝。 */
+    private Path resolveSource(String pdfSource, Path taskDir) {
         Path local = SandboxPaths.resolveWithin(taskDir, pdfSource);
         if (local == null || !Files.isRegularFile(local)) {
             return null;
         }
         return local;
-    }
-
-    private static boolean isDownloaded(String pdfSource) {
-        return isHttpUrl(pdfSource);
     }
 
     /** 每批喂视觉模型的页数 = min(pdf.pages-per-call, vision.max-images)，至少 1。 */
@@ -339,39 +323,6 @@ public class PdfService {
             throw new IllegalStateException("pdfinfo 未给出页数（可能不是有效 PDF）：" + snippet(out));
         }
         return Integer.parseInt(m.group(1));
-    }
-
-    private Path download(URI uri, Path taskDir, int maxBytes) throws Exception {
-        Path target = taskDir.resolve("source.pdf");
-        HttpRequest req = HttpRequest.newBuilder(uri)
-                .timeout(java.time.Duration.ofSeconds(120))
-                .GET().build();
-        HttpResponse<InputStream> resp = http.send(req, HttpResponse.BodyHandlers.ofInputStream());
-        if (resp.statusCode() / 100 != 2) {
-            throw new IllegalStateException("下载 PDF 失败 HTTP " + resp.statusCode());
-        }
-        long total = 0;
-        try (InputStream in = resp.body(); OutputStream os = Files.newOutputStream(target)) {
-            byte[] buf = new byte[64 * 1024];
-            int n;
-            while ((n = in.read(buf)) > 0) {
-                total += n;
-                if (total > maxBytes) {
-                    Files.deleteIfExists(target);
-                    throw new IllegalStateException("PDF 超过体积上限 " + maxBytes + " 字节");
-                }
-                os.write(buf, 0, n);
-            }
-        }
-        if (total == 0) {
-            Files.deleteIfExists(target);
-            throw new IllegalStateException("下载到的 PDF 为空");
-        }
-        return target;
-    }
-
-    private URI validateUrl(String url, AgentProperties.Pdfs cfg) {
-        return SourceFiles.validateUrl(url, cfg.getSsrfAllowlist());
     }
 
     /**

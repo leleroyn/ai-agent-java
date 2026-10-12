@@ -1,7 +1,6 @@
 package com.jtzj.agent.runtime;
 
 import com.jtzj.agent.core.config.AgentProperties;
-import com.jtzj.agent.core.service.OcrTextService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -84,39 +83,11 @@ public class TaskWorkspaceFactory {
     }
 
     /**
-     * Remove one task's OCR scratch directory ({@code <taskDir>/.ocr}) once its run is over.
-     *
-     * <p>The OCR text has to survive the run — that is what lets a second extract call skip
-     * re-recognising a 72-page scan — but it must not survive it: the raw document text is exactly
-     * what must never reach the model's context, and the task directory doubles as the audit trail.
-     * Touches nothing else in the task directory.
-     *
-     * @return true when the scratch directory was removed
-     */
-    public boolean deleteScratch(Path taskDir) {
-        Path root = root();
-        Path dir = taskDir.toAbsolutePath().normalize().resolve(OcrTextService.SCRATCH_DIR);
-        if (!dir.startsWith(root) || dir.equals(root) || !Files.isDirectory(dir)) {
-            return false;
-        }
-        try (var walk = Files.walk(dir)) {
-            walk.sorted(Comparator.reverseOrder()).forEach(path -> {
-                try {
-                    Files.deleteIfExists(path);
-                } catch (IOException e) {
-                    log.debug("could not delete '{}'", path, e);
-                }
-            });
-            log.debug("ocr scratch removed: {}", dir);
-            return true;
-        } catch (IOException e) {
-            log.warn("could not clean ocr scratch '{}': {}", dir, e.getMessage());
-            return false;
-        }
-    }
-
-    /**
-     * Remove a task directory when retention is disabled. Never recurses outside the root.
+     * Remove a whole task directory - sources ({@code src/}), OCR text ({@code .ocr/}) and the
+     * ingest manifest ({@code .ingest/}) included. This is the only cleanup the runner performs,
+     * and {@code agent.tools.delete-workspace-on-finish} is the only switch: when it is off,
+     * nothing under the task directory is touched, which is what keeps the test environment
+     * debuggable. Never recurses outside the root.
      *
      * @return true when something was deleted
      */

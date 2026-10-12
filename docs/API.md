@@ -433,8 +433,6 @@ UPDATE agent_task SET callback_status='pending'
   "data": [
     { "name": "extract_document_fields", "description": "文档结构化字段抽取（图片/PDF/TXT）……" },
     { "name": "get_system_time", "description": "获取服务器当前日期和时间……" },
-    { "name": "recognize_invoice", "description": "发票识别（专用接口，返回结构化发票字段）……" },
-    { "name": "recognize_seal", "description": "印章识别（专用接口，返回置信度/类型/公司名）……" },
     { "name": "understand_document", "description": "文档自由理解/问答（图片/PDF/TXT）……" }
   ]
 }
@@ -443,8 +441,8 @@ UPDATE agent_task SET callback_status='pending'
 说明：
 
 - `name` 是模型调用时用的工具名，`description` 是用途说明——两者都取自**真正装配出来的工具 schema**，与运行时完全一致，不是另写的一份清单。
-- 只列自定义工具：`get_system_time`、`understand_document`、`extract_document_fields`、`recognize_seal`、`recognize_invoice`。框架内置的 `execute_shell_command`/`view_text_file`/`write_text_file`/`insert_text_file`/`list_directory`/`todo_write` **不在此列**。
-- 列表随 `agent.tools.*` 开关变化：关掉某个开关（如 `AGENT_TOOL_DOCUMENT_EXTRACT=false`、`AGENT_TOOL_SEAL_RECOGNITION=false`），对应自定义工具就不再出现；全部关掉时返回空数组。
+- 只列自定义工具：`get_system_time`、`understand_document`、`extract_document_fields`。印章 / 发票不在这里——它们是**技能**（`seal-recognition` / `invoice-recognition`，见 §7），靠镜像里的 `ips` CLI 完成，见 §6.2。框架内置的 `execute_shell_command`/`view_text_file`/`write_text_file`/`insert_text_file`/`list_directory`/`todo_write` **不在此列**。
+- 列表随 `agent.tools.*` 开关变化：关掉某个开关（如 `AGENT_TOOL_DOCUMENT_EXTRACT=false`），对应自定义工具就不再出现；全部关掉时返回空数组。
 
 ### 6.1 `extract_document_fields` 的返回口径
 
@@ -470,41 +468,77 @@ UPDATE agent_task SET callback_status='pending'
 - OCR 有页失败时不算「全文已遍历」：txt 里留一行 `--- 第 N 页 OCR 失败（该页内容缺失）---`，
   产物改名带 `-partial`（不参与复用，下次调用重跑），返回值改为 `status=partial` + `partial_note`、
   去掉 `null_note`。一页瞬时故障不能被宣告成「文档里没有这个字段」。
-- 所有文档抓取（OCR 转文本、`recognize_seal`、`recognize_invoice`、PDF 理解）都过同一个
+- 所有远程抓取（任务启动前的指令文件预处理、OCR 转文本、PDF 理解）都过同一个
   `agent.pdfs.ssrf-allowlist` 主机白名单（后缀匹配，留空=不限制）。
-- **工具幂等**：`extract_document_fields` / `understand_document` / `recognize_seal` / `recognize_invoice` 每次调用先查
+- **工具幂等**：`extract_document_fields` / `understand_document` 每次调用先查
   任务目录里的 `.ocr/calls.json`——同一工具 + 同一组参数（来源列表、字段列表都排序归一，「A B」与「B A」同一个 key）
   第二次调用**直接返回第一次的返回**，不重 OCR、不重跑模型、不再打接口。台账只存工具自己的结构化结论
-  （超过 32000 字符就不存）。**计数与存结果是两件事**：以 `Error:` 开头的返回、以及 seal/invoice 里所有来源都失败的
+  （超过 32000 字符就不存）。**计数与存结果是两件事**：以 `Error:` 开头的返回、以及所有来源都失败的
   返回（`status=error`）不存结果（接口抖动可以重试），但仍然计数，否则模型对着一个一直失败的来源会无限重试；
   OCR 全文、图片字节都不进台账也不进内存，
   任务目录删掉台账就没了，跨任务也不复用——它是重复调用闸，不是内容缓存。
-  另外三个工具（seal / invoice / understand）还有硬闸：一次任务最多**真跑** 4 次，超了直接返回拒绝文案；
+  `understand_document` 另有硬闸：一次任务最多**真跑** 4 次，超了直接返回拒绝文案；
   `extract_document_fields` 用的是上面那条「同一来源最多抽 3 次」的闸。`get_system_time` 不参与幂等。
+  印章/发票/身份证/营业执照走的是 §6.2 的 CLI，幂等靠 CLI 自己的结果缓存，不在这条台账里。
 
 - 藏进子目录本身拦不住模型（`list_directory` 不过滤点开头目录，`view_text_file` 也不校验后缀），所以隔离靠不注册读文件的工具，见下一条。
 - 想彻底断掉「模型换工具自查」，就把内置文件工具关掉：`AGENT_TOOL_READ=false`（同时去掉 `view_text_file` 和 `list_directory`）、必要时 `AGENT_TOOL_SHELL=false`。框架的权限规则只能按工具名 deny，做不到按路径，所以路径级隔离只能靠不注册工具。
-- **shell 建议直接关（`AGENT_TOOL_SHELL=false`）**：框架的 shell 工具不截断输出，模型 `curl` 一个大文件到 stdout 会把整个文件灌进主模型上下文（实测 30MB PDF ≈ 13.7 万字符二进制），任务随即空转到 max-iters 无结果；`AGENT_SHELL_ALLOWED=curl` 只约束可执行文件名，管不住输出体积，且 curl 落盘的本地副本还能绕过 `AGENT_PDF_SSRF_ALLOWLIST`（本地路径不再走 URL 白名单校验）。文档工具都直接吃 URL，关掉 shell 不影响任何正常能力。
+- **不需要 §6.2 那几项识别时，shell 直接关（`AGENT_TOOL_SHELL=false`）**：框架的 shell 工具不截断输出，模型把一个大文件打到 stdout 会整篇灌进主模型上下文（实测 30MB PDF ≈ 13.7 万字符二进制），任务随即空转到 max-iters 无结果。
+- **要保留 §6.2 的识别能力时，用逐段白名单收紧而不是关掉**：`AGENT_SHELL_ALLOWED=ips`。校验按 `; | & 换行` 拆段，每段首个可执行文件都必须在白名单里，所以管道仍可用（`ips seal src/x.jpg | head -c 500` 会因为 `head` 不在名单而被拒，不是因为含管道）。这样 `cat`/`grep`/`head`/`python` 全都跑不了，shell 读不到本地文件内容。黑名单 `AGENT_SHELL_DENIED` 同样逐段判，条目可以是裸名（`curl`，命中 `/usr/bin/curl`）或路径后缀（`native/ips`，命中绝对路径直调未包装的二进制），默认已含 `curl,wget,/opt/agent-cli/native/ips`。
+- 白名单只掐 shell，且只看每段的**可执行文件**、不看参数——`ips seal src/x.jpg > /tmp/o.txt` 的重定向目标不在管控内。
+- 白名单也管不到文件工具：`view_text_file`/`list_directory` 仍能读本任务目录内的文件（含 `.ocr/` 下的 OCR 全文），要一并断掉就设 `AGENT_TOOL_READ=false`。框架的权限规则只能按工具名 deny，做不到按路径。
 - OCR 文本通道**只用于字段抽取**。`understand_document` 对 PDF 始终走视觉，因为 OCR 文本会丢掉版面与图形信息。
 - `understand_document` **不暴露页范围**：PDF 按 `min(agent.pdfs.pages-per-call, agent.vision.max-images)` 页一批，服务端遍历全部页、每批问同一个问题，再用 `agent.text-model` 把各批归并成**一段**回答（批与批并发，`agent.pdfs.understand-parallelism` 默认 2，归并仍严格按批序）；图片来源超过 `max-images` 同样自动分批。TXT 超过一个文本块也一样分批归并。失败批次会在回答末尾列出，不会静默丢页——早先"超过单次上限就返回一段文案让模型自己用 `page_range` 分批"的做法已删掉，它把遍历全文的责任推给了模型，实测模型会为一个问题连开 5 次不同页范围。
 - **文档类指令必须真的读文件**：指令里点名了文档文件（`http(s)` URL 带 pdf/jpg/png/txt/… 后缀）、但整趟运行一个工具都没调时，服务端会带「必须先调工具」的硬约束重试一次；仍不调工具就 `status=failed` + `error.code=NO_RESULT`，绝不把模型凭记忆编出来的字段值当结果返回。要退回「只告警不拦截」，设 `AGENT_FORCE_DOCUMENT_TOOL=false`。
 
-### 6.2 `recognize_seal` / `recognize_invoice` 的返回口径
+### 6.2 印章 / 发票 / 身份证 / 营业执照：技能 + 镜像内置 `ips` CLI
 
-这两个是**专用识别接口**的内置工具（综合服务平台 `/api/v3/seal/preprocess`、`/api/v3/invoice/preprocess`），取代早先技能里的 curl 示例。
+这四项**不是内置工具**，而是随 jar 内置的技能 `seal-recognition` / `invoice-recognition` /
+`idcard-recognition` / `bizlic-recognition`，由模型用 `execute_shell_command` 调镜像里的
+`ips seal` / `ips invoice` / `ips idcard` / `ips bizlic`（打包与白名单见 DESIGN §12）。
+因此它们只在 `AGENT_TOOL_SHELL=true` 时可用；调用方要强制生效就在请求里带 `"skills":["seal-recognition"]`。
 
-共同点：
+命令形态（来源只能是任务目录内的本地路径，文件已在 `src/` 下）：
 
-- `source` 直接吃 `http(s)` URL 或任务目录内的路径，可多个（空格/换行分隔）；**下载在工具内部完成**，模型不需要也不应该先 `curl -o` 落盘。
-- 返回 `{status, results:[{source, ...}]}`，`status` = `ok` / `partial` / `error`；单个来源失败只影响它自己，原因在该来源的 `error` 里。
-- 返回值只含结构化结论，**不含图片 base64**（印章裁剪图固定不取）。内存里没有缓存，幂等靠任务目录里的调用台账（见 6.1）：同一组参数第二次调用直接返回上次结果，所以每个来源调一次就够。
-- 服务地址：`agent.ips.base-url`——OCR / 印章 / 发票是同一台服务的三个接口，一个基址管三个。
+```
+ips seal src/1-seal_1.jpg
+ips invoice src/2-invoice.png
+ips idcard src/3-idcard.jpg
+ips bizlic src/4-bizlic.jpg
+```
 
-`recognize_seal` → `results[].seals[] = {confidence, seal_type, company}`（`seal_type` 1=圆形红章、2=圆形灰章；`company` 即接口 `ocr_result`），另有 `seal_count`。`seals=[]` 表示未检出印章，是权威结论而非错误。
+**哪些接口吃 PDF**：`seal` / `invoice` / `ocr` 支持图片和 PDF；`idcard` / `bizlic` **只收图片**
+（v3 路由里只有前三个做了 PDF 分支），传 PDF 会报错，技能正文里已让模型改走 `extract_document_fields`。
 
-`recognize_invoice` → `results[] = {confidence, fields}`。接口的 `ocr_text` 本来是个 JSON 字符串，工具已解成 `fields` 对象（key 就是 `发票号码`/`购货方公司名称`/`发票总金额` 这些接口口径名，不要改名）；解不开才退回 `fields_raw`。检测不到有效发票时该来源返回 `error`（附接口给的纯文本原因）。
+`ips seal` → stdout 是 JSON 数组，一个印章一个对象：`{confidence, ocr_result, seal_type, seal_image_base64}`。
+`ocr_result` 就是印章上的公司名称，`seal_type` 1=圆形红章、2=圆形灰章，`seal_image_base64` 恒为空串。
+空数组 `[]` 表示未检出印章，是权威结论而非错误。
 
----
+`ips invoice` → stdout 是**最多 1 个元素**的数组：`{confidence, invoice_type, ocr_text, source_text, corp_image_base64}`。
+**`ocr_text` 本身是个 JSON 字符串**，要再解析一层；key 就是接口口径名（`发票号码`/`发票代码`/`开票日期`/
+`购货方公司名称`/`销售方公司名称`/`发票金额`/`发票总金额`/…），不要改名。
+
+`ips idcard` / `ips bizlic` → stdout 是**恰好 1 个元素**的数组：`{confidence, idcard_type|bizlic_type,
+ocr_text, corp_image_base64}`。`ocr_text` 同样是 JSON 字符串，要再解析一层；key 就是接口口径名——
+身份证：`姓名`/`性别`/`民族`/`出生`/`住址`/`公民身份号码`/`签发机关`/`有效期限`；
+营业执照：`社会统一信用代码`/`企业名称`/`类型`/`法定代表人`/`注册资本`/`成立日期`/`营业期限`/`住所`/`经营范围`。
+`idcard_type` 与 `bizlic_type` 都恒为 1（检测模型不区分正反面/版本，只是证件类别）；`corp_image_base64` 恒为 null
+（CLI 固定 `return_corp_image=false`）。这两个接口没检出时不返回空数组，而是抛 400（见下面「不是发票」那条，
+文案分别是「未检测到有效身份证.」「未检测到有效营业执照.」），同样是终局结论。
+
+超时：CLI `1.0.5` 起自带 `--timeout` 默认 **180s**，多页 PDF 的印章/发票检测够用。包装脚本只在运维显式设了
+`IPS_TIMEOUT_SECONDS` 时才追加 `--timeout`（`scripts/docker-run.sh` 按 shell > `.env` 同名键 > 默认解析，
+`.env` 里没写 `IPS_TIMEOUT_SECONDS` 时退回 `AGENT_IPS_TIMEOUT`，让两边超时同源）；没设就用 CLI 自带默认，
+调用方显式写了 `--timeout` 一律优先。
+
+退出码：`0` 成功；`1` 运行或接口错误（stderr 是中文原因）；`2` 参数错误；`3` 子命令未开放
+（`IPS_ALLOWED_SUBCOMMANDS` 没放行）。
+
+**「不是发票」也是结论**：stdout 空 + 退出码 `1` + stderr `错误: API 错误: HTTP 400 未检测到有效发票`
+表示这份文件不是中国增值税发票（英文商业 invoice、形式发票、收据都会这样），不是格式错误。
+
+幂等靠 CLI 自己的结果缓存（`IPS_CACHE_DIR`，按「接口+来源」做 key，命中 ~0.1s），不走 §6.1 的调用台账。
+升级 CLI 时要清这个缓存目录，否则旧版本写入的 seal 条目（`ocr_result` 为空串）会被继续命中。
 
 ## 7. 技能清单
 
@@ -524,7 +558,10 @@ UPDATE agent_task SET callback_status='pending'
 
 说明：
 
-- 技能放在运维目录（默认 `./agent-skills`），结构为 `<技能名>/SKILL.md`。
+- 技能有两个来源，结构都是 `<技能名>/SKILL.md`：jar 内置（`agent.skills.classpath-location`，默认 `skills`，
+  含 `seal-recognition` / `invoice-recognition` / `idcard-recognition` / `bizlic-recognition`）与运维目录
+  （默认 `./agent-skills`）。同名时**运维目录覆盖内置**，
+  所以可以不重打镜像改技能措辞。
 - **新增或修改技能不需要重启**，下一个任务即生效，本接口立刻反映变化。
 - 请求里 `skills` 填的就是这里的名字，**大小写敏感**，写错返回 `code=1001`。
 - 故意不放进 `/health`：技能列表随运维操作变化，与健康无关，而 health 调用频率高得多。

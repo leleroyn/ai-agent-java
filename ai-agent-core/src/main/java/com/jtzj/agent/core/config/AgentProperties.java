@@ -547,6 +547,13 @@ public class AgentProperties {
         /** Empty means no allowlist is configured. */
         private List<String> shellAllowedCommands = new ArrayList<>();
         /**
+         * 命令级黑名单：按 {@code ; | & 换行} 拆段后取每段第一个 token，去引号取 basename，
+         * 大小写不敏感比对。与白名单互补——白名单非空时框架会连带禁掉管道/组合命令，混合任务
+         * 就没法用；黑名单只掐明确危险的命令（默认 {@code curl,wget}：它们会把指令里已就绪的
+         * 文件再下一遍，导致同一份内容被重复 OCR）。空列表 = 不禁任何命令。
+         */
+        private List<String> shellDeniedCommands = new ArrayList<>();
+        /**
          * Delete {@code <working-dir>/<taskId>} once a task reaches a terminal state.
          * Defaults to false so produced files remain inspectable; enable it when the
          * workspace is treated as scratch space.
@@ -641,6 +648,14 @@ public class AgentProperties {
 
         public void setShellAllowedCommands(List<String> shellAllowedCommands) {
             this.shellAllowedCommands = shellAllowedCommands;
+        }
+
+        public List<String> getShellDeniedCommands() {
+            return shellDeniedCommands;
+        }
+
+        public void setShellDeniedCommands(List<String> shellDeniedCommands) {
+            this.shellDeniedCommands = shellDeniedCommands;
         }
 
         public boolean isDeleteWorkspaceOnFinish() {
@@ -944,8 +959,8 @@ public class AgentProperties {
      *
      * <ul>
      *   <li>{@code POST /api/v3/ocr/preprocess}      文字识别——抽取类任务的统一文本通道</li>
-     *   <li>{@code POST /api/v3/seal/preprocess}     印章识别——内置工具 {@code recognize_seal}</li>
-     *   <li>{@code POST /api/v3/invoice/preprocess}  发票识别——内置工具 {@code recognize_invoice}</li>
+     *   <li>{@code POST /api/v3/seal/preprocess}     印章识别——技能 seal-recognition 经镜像内置 {@code ips seal}</li>
+     *   <li>{@code POST /api/v3/invoice/preprocess}  发票识别——技能 invoice-recognition 经镜像内置 {@code ips invoice}</li>
      * </ul>
      *
      * <p>三者共用 {@code baseUrl} 与 {@code enabled}；分开的是各自超时，以及 OCR 特有的
@@ -956,9 +971,6 @@ public class AgentProperties {
         private boolean enabled = true;
         /** 服务基址（不带路径）；留空=三个接口全部不可用。 */
         private String baseUrl = "http://127.0.0.1:8000";
-        /** 印章/发票单次请求超时（秒）：PDF 逐页检测、发票内部还走大模型，比 OCR 慢。 */
-        private int timeoutSeconds = 180;
-
         /** OCR 单次请求超时（秒）。一页一请求，这个值直接决定扫描件的时间上限。 */
         private int ocrTimeoutSeconds = 120;
         /** OCR 栅格化 dpi（0=用 pdftoppm 默认）。OCR 需要比视觉通道更高的分辨率。 */
@@ -994,14 +1006,6 @@ public class AgentProperties {
 
         public void setBaseUrl(String baseUrl) {
             this.baseUrl = baseUrl;
-        }
-
-        public int getTimeoutSeconds() {
-            return timeoutSeconds;
-        }
-
-        public void setTimeoutSeconds(int timeoutSeconds) {
-            this.timeoutSeconds = Math.max(5, timeoutSeconds);
         }
 
         public int getOcrTimeoutSeconds() {

@@ -10,14 +10,14 @@ SAMPLER=$!
 
 echo "== T1 seal small (streaming upload) =="
 cat > c41-seal-small.json <<EOF
-{"taskId":"s41-seal-small","instruction":"用 recognize_seal 工具从 $SEAL 识别印章（不要先下载文件），取 results[].seals[].company 放入键\"公司\"。最终答案只输出一个 JSON 对象，不要输出任何解释、前后缀或 Markdown 代码围栏。","options":{"sync":true,"timeoutSeconds":300}}
+{"taskId":"s41-seal-small","instruction":"用 seal-recognition 技能从 $SEAL 识别印章（不要先下载文件），取 seals[].ocr_result 放入键\"公司\"。最终答案只输出一个 JSON 对象，不要输出任何解释、前后缀或 Markdown 代码围栏。","skills":["seal-recognition"],"options":{"sync":true,"timeoutSeconds":300}}
 EOF
 curl -s -X POST $API -H "Content-Type: application/json" --data @c41-seal-small.json > r41-seal-small.json
 python3 -c "import json;d=json.load(open('r41-seal-small.json'))['data'];print('T1',d['status'],d.get('durationMs'),(d.get('resultText') or d.get('error') or '')[:200])"
 
 echo "== T2 seal BIG 72p/30MB pdf (streaming upload) =="
 cat > c41-seal-big.json <<EOF
-{"taskId":"s41-seal-big","instruction":"用 recognize_seal 工具从 $P72 识别印章（不要先下载文件），把所有 seals[].company 去重后放入键\"公司\"。最终答案只输出一个 JSON 对象，不要输出任何解释、前后缀或 Markdown 代码围栏。","options":{"sync":true,"timeoutSeconds":420}}
+{"taskId":"s41-seal-big","instruction":"用 seal-recognition 技能从 $P72 识别印章（不要先下载文件），把所有 seals[].ocr_result 去重后放入键\"公司\"。最终答案只输出一个 JSON 对象，不要输出任何解释、前后缀或 Markdown 代码围栏。","skills":["seal-recognition"],"options":{"sync":true,"timeoutSeconds":420}}
 EOF
 curl -s -X POST $API -H "Content-Type: application/json" --data @c41-seal-big.json > r41-seal-big.json
 python3 -c "import json;d=json.load(open('r41-seal-big.json'))['data'];print('T2',d['status'],d.get('durationMs'),(d.get('resultText') or d.get('error') or '')[:400])"

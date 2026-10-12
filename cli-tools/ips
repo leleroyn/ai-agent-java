@@ -1,0 +1,93 @@
+#!/bin/sh
+# ips 命令行包装器：子命令白名单 + 统一超时。
+#
+# 为什么要包一层：框架的 shell 白名单只比对命令的第一个 token（比对不到 ips 后面的子命令），
+# 所以「哪些识别接口允许 agent 直接调」只能在这一层判。真二进制在 native/ips，不在 PATH 上。
+#
+# 超时：CLI 1.0.5 起自带 --timeout 默认 180s，够用（72 页扫描件的印章检测一次几十秒），这里不再补默认值。
+# 只有运维显式设了 IPS_TIMEOUT_SECONDS 才追加 --timeout，用来把它和 Java 侧的 AGENT_IPS_TIMEOUT 绑成
+# 一个旋钮（scripts/docker-run.sh 就是这么注入的）；没设就用 CLI 自己的默认，避免这里写死一个更小的值
+# 反而把 180s 降级。调用方显式写了 --timeout 时一律尊重显式值。
+#
+# 退出码约定：0 成功；1 = ips 自身运行/接口错误；2 = clap 参数错误（原生）；
+# 3 = 被本包装器的策略拒绝（刻意与 2 区分，脚本与日志据此判「没开放」而不是「写错了」）。
+#
+# 残余风险（已知、接受）：模型可以用绝对路径直调 native/ips 绕过这里，靠技能正文与 sys-prompt 的
+# 禁令兜底，不做进程级隔离。
+
+set -u
+
+self_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+bin="$self_dir/native/ips"
+
+if [ ! -x "$bin" ]; then
+    echo "错误: ips 主程序缺失: $bin" >&2
+    exit 127
+fi
+
+allowed=${IPS_ALLOWED_SUBCOMMANDS:-idcard,bizlic,invoice,seal,card,handprint}
+default_timeout=${IPS_TIMEOUT_SECONDS:-}
+
+# 无参数：原样交给真二进制（它自己打帮助并返回非 0）。
+if [ "$#" -eq 0 ]; then
+    exec "$bin"
+fi
+
+# 定位子命令：先跳过 clap 的全局选项，否则 ips --timeout 60 seal x.jpg 会把 --timeout
+# 当子命令误拒（clap 允许全局选项写在任意位置，模型也就会这么写）。
+sub=''
+expect_value=0
+for arg in "$@"; do
+    if [ "$expect_value" -eq 1 ]; then
+        expect_value=0
+        continue
+    fi
+    case "$arg" in
+        --timeout) expect_value=1 ;;
+        -h|--help|-V|--version) ;;
+        -*) ;;
+        *) sub=$arg; break ;;
+    esac
+done
+
+# 没找到子命令（只有选项 / 选项写错）：交给真二进制，由 clap 报错（退出码 2）。
+if [ -z "$sub" ]; then
+    exec "$bin" "$@"
+fi
+
+case "$sub" in
+    help|-h|--help|-V|--version)
+        exec "$bin" "$@"
+        ;;
+esac
+
+found=0
+old_ifs=$IFS
+IFS=,
+for name in $allowed; do
+    name=$(printf '%s' "$name" | tr -d ' ')
+    if [ "$name" = "$sub" ]; then
+        found=1
+        break
+    fi
+done
+IFS=$old_ifs
+
+if [ "$found" -ne 1 ]; then
+    echo "错误: 子命令 '$sub' 未开放（当前 IPS_ALLOWED_SUBCOMMANDS=$allowed）。" >&2
+    echo "提示: 字段抽取请用 extract_document_fields，开放理解请用 understand_document，不要在这里读原文。" >&2
+    exit 3
+fi
+
+# 补超时（clap 的全局选项可以写在任意位置，追加在最后即可）。default_timeout 为空 = 用 CLI 自带默认。
+has_timeout=0
+for arg in "$@"; do
+    case "$arg" in
+        --timeout|--timeout=*) has_timeout=1 ;;
+    esac
+done
+if [ -n "$default_timeout" ] && [ "$has_timeout" -eq 0 ]; then
+    set -- "$@" --timeout "$default_timeout"
+fi
+
+exec "$bin" "$@"

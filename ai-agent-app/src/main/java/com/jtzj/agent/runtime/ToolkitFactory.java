@@ -106,7 +106,10 @@ public class ToolkitFactory {
         // Framework built-ins — these belong to the app, so their flags stay typed config here.
         if (includeBuiltins && t.isShell()) {
             // Three-arg form binds the shell's working directory to this task's sandbox.
-            ShellCommandTool shell = new ShellCommandTool(base, new HashSet<>(t.getShellAllowedCommands()), null);
+            // 黑名单走 CommandValidator 而不是白名单：白名单非空时框架会连带拒掉所有管道/组合命令，
+            // 混合任务没法用（见 DenyListCommandValidator）。
+            ShellCommandTool shell = new ShellCommandTool(base, new HashSet<>(t.getShellAllowedCommands()),
+                    null, new DenyListCommandValidator(t.getShellDeniedCommands()));
             for (String command : t.getShellAllowedCommands()) {
                 if (command != null && !command.isBlank()) {
                     shell.addAllowedCommand(command.trim());

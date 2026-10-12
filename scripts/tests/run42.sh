@@ -1,10 +1,12 @@
 set -e
 cd /data/ai-agent
 cp .env .env.bak42
-grep -vE '^AGENT_PDF_SSRF_ALLOWLIST=|^AGENT_IPS_OCR_TIMEOUT=' .env.bak42 > .env.new
+grep -vE '^AGENT_PDF_SSRF_ALLOWLIST=|^AGENT_IPS_OCR_TIMEOUT=|^AGENT_TOOL_SHELL=|^AGENT_SHELL_DENIED=' .env.bak42 > .env.new
 cat >> .env.new <<EOF
 AGENT_PDF_SSRF_ALLOWLIST=192.168.2.203
 AGENT_IPS_OCR_TIMEOUT=2
+AGENT_TOOL_SHELL=true
+AGENT_SHELL_DENIED=curl,wget
 EOF
 mv .env.new .env
 docker rm -f ai-agent-java >/dev/null 2>&1 || true
@@ -15,16 +17,16 @@ API=http://localhost:8080/api/v1/agent/task
 SEAL=http://192.168.2.203:8090/files/test/examples/seal_1.jpg
 P72=http://192.168.2.203:8090/files/test/20260920/0914625f63c247c2865a88f0df5dc658.pdf
 
-echo "== A: disallowed host must be rejected =="
+echo "== A: disallowed host must be rejected at ingest (agent must not start) =="
 cat > c42-ssrf.json <<EOF
-{"taskId":"s42-ssrf","instruction":"用 recognize_seal 工具从 http://127.0.0.1:8090/files/test/examples/seal_1.jpg 识别印章，把工具返回原文放进键\"结果\"。最终答案只输出一个 JSON 对象。","options":{"sync":true,"timeoutSeconds":120}}
+{"taskId":"s42-ssrf","instruction":"识别 http://127.0.0.1:8090/files/test/examples/seal_1.jpg 的印章，把印章上的公司名称放入键\"公司\"。最终答案只输出一个 JSON 对象。","skills":["seal-recognition"],"options":{"sync":true,"timeoutSeconds":120}}
 EOF
 curl -s -X POST $API -H "Content-Type: application/json" --data @c42-ssrf.json > r42-ssrf.json
-python3 -c "import json;d=json.load(open('r42-ssrf.json'))['data'];print('A',d['status'],d.get('durationMs'),(d.get('resultText') or d.get('error') or '')[:300])"
+python3 -c "import json;d=json.load(open('r42-ssrf.json'))['data'];print('A',d['status'],d.get('durationMs'),json.dumps(d.get('error'),ensure_ascii=False)[:300])"
 
 echo "== B: allowed host still works =="
 cat > c42-ok.json <<EOF
-{"taskId":"s42-ok","instruction":"用 recognize_seal 工具从 $SEAL 识别印章，取 results[].seals[].company 放入键\"公司\"。最终答案只输出一个 JSON 对象。","options":{"sync":true,"timeoutSeconds":120}}
+{"taskId":"s42-ok","instruction":"识别 $SEAL 的印章，把印章上的公司名称放入键\"公司\"。最终答案只输出一个 JSON 对象。","skills":["seal-recognition"],"options":{"sync":true,"timeoutSeconds":120}}
 EOF
 curl -s -X POST $API -H "Content-Type: application/json" --data @c42-ok.json > r42-ok.json
 python3 -c "import json;d=json.load(open('r42-ok.json'))['data'];print('B',d['status'],d.get('durationMs'),(d.get('resultText') or d.get('error') or '')[:200])"

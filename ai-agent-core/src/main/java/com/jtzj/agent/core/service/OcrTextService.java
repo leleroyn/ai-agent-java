@@ -29,22 +29,23 @@ import org.springframework.stereotype.Component;
  * （一批内先全部识别完、再按页号顺序落盘）。每页前写 {@code --- 第 N 页 ---} 便于溯源。
  * 图片一次 OCR。
  *
- * <p><b>同一份内容只 OCR 一次</b>：txt 文件名带内容的 SHA-256 前缀，所以「URL」和模型自己下载出来的
- * 「本地副本」会算出同一个名字，第二次调用直接复用那份 txt。按来源字符串缓存做不到这一点——
- * 实测模型先 {@code curl -o contract.pdf} 再传本地路径，同一个 key 变成两个，72 页被重新识别一遍。
+ * <p><b>同一份内容只 OCR 一次</b>：txt 文件名带内容的 SHA-256 前缀，所以同一份文件不管被点名几次、
+ * 换个什么路径，第二次调用都直接复用那份 txt。按来源字符串缓存做不到这一点——实测模型为一个字段
+ * 把同一来源换个名字传进来，key 变成两个，72 页被重新识别一遍。
  *
  * <p>OCR 文本落在任务目录的 {@code .ocr/} 子目录，<b>不进主模型上下文</b>：工具只返回归并后的字段
  * 值，返回值里不出现这个路径。藏进子目录本身拦不住模型——框架的 list_directory 用 {@code Files.list}
  * （不过滤点开头目录），view_text_file 也不校验后缀，只校验路径在沙箱内。真正的隔离靠部署侧关掉
  * {@code agent.tools.read-file} 并把 shell 白名单收成 curl：模型没有读文件的入口。
  * 同一来源换一批字段再抽时直接复用那份 txt，不重新识别（不做内存缓存，去重只看文件在不在）。
- * 整次任务跑完由 {@code AgentTaskRunner} 删掉整个 {@code .ocr/}，原文不留盘。
+ * 跑完只在 {@code agent.tools.delete-workspace-on-finish=true} 时随整个任务目录一起清掉；
+ * 配成 false 时全部保留，便于事后排查。
 */
 @Component
 public class OcrTextService {
 
     private static final Logger log = LoggerFactory.getLogger(OcrTextService.class);
-    /** OCR 文本与临时页图的去向：仍在任务沙箱内，整次任务跑完后由 {@code AgentTaskRunner} 清掉。 */
+    /** OCR 文本与临时页图的去向：仍在任务沙箱内，仅在 delete-workspace-on-finish=true 时随任务目录清除。 */
     public static final String SCRATCH_DIR = ".ocr";
 
     /**
@@ -68,7 +69,7 @@ public class OcrTextService {
     /**
      * 把一份图片/PDF 转成任务目录里的文本文件。
      *
-     * @param source  http/https URL，或任务工作目录内的相对路径
+     * @param source  任务工作目录内的相对路径（URL 已在任务启动前由 SourceIngestor 换成本地路径）
      * @param taskDir 任务沙箱目录
      * @return 成功时返回 txt 在任务目录内的相对路径（{@code .ocr/xxx.txt}）；失败时返回 {@code "Error: ..."}
     */
@@ -76,51 +77,40 @@ public class OcrTextService {
         if (!ipsClient.isEnabled()) {
             return "Error: OCR 通道未启用（agent.ips.enabled=false 或未配 agent.ips.base-url），抽取无法进行。";
         }
-        int maxBytes = props.getPdfs().getMaxDownloadBytes();
         Path scratch = null;
         try {
             scratch = scratchDir(taskDir);
-            SourceFiles.Fetched fetched = SourceFiles.fetch(source, taskDir, scratch, maxBytes, props.getPdfs().getSsrfAllowlist());
+            SourceFiles.Fetched fetched = SourceFiles.fetch(source, taskDir);
             if (!fetched.ok()) {
                 return fetched.error();
             }
             Path file = fetched.file();
-            try {
-                if (Files.size(file) == 0) {
-                    return "Error: 文件为空。";
-                }
-                // 文件名带内容哈希：同一份内容（不管从 URL 还是本地副本进来）只会 OCR 一次。
-                String hash = SourceFiles.sha256(file);
-                String stem = baseName(source) + "-" + hash.substring(0, 12);
-                Path out = scratch.resolve(stem + ".txt");
-                Path partialOut = scratch.resolve(stem + PARTIAL_SUFFIX + ".txt");
-                if (Files.isRegularFile(out) && Files.size(out) > 0) {
-                    log.info("reuse txt {} for source {} (same content, sha256={})",
-                            out, source, hash.substring(0, 12));
-                    return SCRATCH_DIR + "/" + out.getFileName();
-                }
-                // 上一次的残缺结果不复用：宁可重跑一遍 OCR，也不能让一页瞬时失败永久吃掉那几页的字段。
-                Files.deleteIfExists(partialOut);
-                String error = isPdf(file)
-                ? ocrPdfPerPage(file, out, partialOut, source, scratch)
-                : ocrWholeFile(file, out, source);
-                if (error != null) {
-                    return error;
-                }
-                Path produced = Files.exists(out) ? out : partialOut;
-                if (!Files.exists(produced)) {
-                    return "Error: OCR 已完成但没有产出文本。";
-                }
-                return SCRATCH_DIR + "/" + produced.getFileName();
-            } finally {
-                if (fetched.temp()) {
-                    try {
-                        Files.deleteIfExists(file);
-                    } catch (Exception ignored) {
-                        // 下载来的临时文件删不掉不影响结果，任务结束时随 .ocr/ 一起清掉
-                    }
-                }
+            if (Files.size(file) == 0) {
+                return "Error: 文件为空。";
             }
+            // 文件名带内容哈希：同一份内容不管被点名几次、换个什么路径，都只 OCR 一次。
+            String hash = SourceFiles.sha256(file);
+            String stem = baseName(source) + "-" + hash.substring(0, 12);
+            Path out = scratch.resolve(stem + ".txt");
+            Path partialOut = scratch.resolve(stem + PARTIAL_SUFFIX + ".txt");
+            if (Files.isRegularFile(out) && Files.size(out) > 0) {
+                log.info("reuse txt {} for source {} (same content, sha256={})",
+                        out, source, hash.substring(0, 12));
+                return SCRATCH_DIR + "/" + out.getFileName();
+            }
+            // 上一次的残缺结果不复用：宁可重跑一遍 OCR，也不能让一页瞬时失败永久吃掉那几页的字段。
+            Files.deleteIfExists(partialOut);
+            String error = isPdf(file)
+            ? ocrPdfPerPage(file, out, partialOut, source, scratch)
+            : ocrWholeFile(file, out, source);
+            if (error != null) {
+                return error;
+            }
+            Path produced = Files.exists(out) ? out : partialOut;
+            if (!Files.exists(produced)) {
+                return "Error: OCR 已完成但没有产出文本。";
+            }
+            return SCRATCH_DIR + "/" + produced.getFileName();
         } catch (Exception e) {
             log.warn("ocr->txt failed for {}: {}", source, e.toString());
             return "Error: 转文本失败：" + e.getClass().getSimpleName() + ": " + e.getMessage();

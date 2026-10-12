@@ -54,12 +54,14 @@ public class AgentTaskRunner {
     private final ModelFactory modelFactory;
     private final ToolkitFactory toolkitFactory;
     private final TaskWorkspaceFactory workspaceFactory;
+    private final SourceIngestor sourceIngestor;
     private final SkillRepositoryFactory skillRepositoryFactory;
     private final StructuredOutputConverter structuredConverter;
     private final ObjectMapper mapper;
 
     public AgentTaskRunner(AgentProperties props, ModelFactory modelFactory,
                            ToolkitFactory toolkitFactory, TaskWorkspaceFactory workspaceFactory,
+                           SourceIngestor sourceIngestor,
                            SkillRepositoryFactory skillRepositoryFactory,
                            StructuredOutputConverter structuredConverter,
                            ObjectMapper mapper) {
@@ -67,6 +69,7 @@ public class AgentTaskRunner {
         this.modelFactory = modelFactory;
         this.toolkitFactory = toolkitFactory;
         this.workspaceFactory = workspaceFactory;
+        this.sourceIngestor = sourceIngestor;
         this.skillRepositoryFactory = skillRepositoryFactory;
         this.structuredConverter = structuredConverter;
         this.mapper = mapper;
@@ -96,21 +99,26 @@ public class AgentTaskRunner {
                           List<String> skills, Duration budget, String modelName) {
         Path taskDir = workspaceFactory.create(taskId);
         try {
-            return runInWorkspace(taskId, instruction, schema, skills, budget, modelName, taskDir);
+            // 指令里的文件 URL 先抓成 src/ 下的本地文件，并把指令里的 URL 换成相对路径：
+            // 工具只吃本地路径，同一份 30MB 扫描件不会在一条任务里被下载好几遍。
+            String rewritten = sourceIngestor.ingest(instruction, taskDir).instruction();
+            return runInWorkspace(taskId, instruction, rewritten, schema, skills, budget, modelName, taskDir);
         } finally {
-            // OCR 中间文本只在本次运行内有意义（同一来源换字段不再重识别）；跑完即删，原文不留盘。
+            // 唯一的清理开关：true 时整个任务目录（含 src/、.ocr/、.ingest/）一起删，
+            // 否则每份扫描件都在盘上留几十 MB；false 时一律保留，测试环境靠它事后排查。
             if (props.getTools().isDeleteWorkspaceOnFinish()) {
-                // 不保留审计：整个任务目录一起清掉，否则每份扫描件都在盘上留几十 MB，只涨不缩。
                 workspaceFactory.delete(taskId);
-            } else {
-                workspaceFactory.deleteScratch(taskDir);
             }
         }
     }
 
-    private RunOutcome runInWorkspace(String taskId, String instruction, JsonNode schema,
-                                      List<String> skills, Duration budget, String modelName,
-                                      Path taskDir) {
+    /**
+     * @param instruction 调用方原始指令，只用于「这条指令提到了文件」的判定
+     * @param rewritten   把文件 URL 换成本地路径后的指令，真正喂给模型
+     */
+    private RunOutcome runInWorkspace(String taskId, String instruction, String rewritten,
+                                      JsonNode schema, List<String> skills, Duration budget,
+                                      String modelName, Path taskDir) {
         Set<String> invokedTools = ConcurrentHashMap.newKeySet();
         ReActAgent agent = newAgent(taskDir, skills, modelName, invokedTools);
         RuntimeContext ctx = RuntimeContext.builder()
@@ -122,9 +130,9 @@ public class AgentTaskRunner {
         // model's discretion; see SkillRepositoryFactory.inlineFor.
         String skillBlock = skillRepositoryFactory.inlineFor(skills);
         String prompt = skillBlock.isEmpty()
-                ? instruction
+                ? rewritten
                 : "已加载的技能规范（必须严格遵循，不要再调用 load_skill_through_path 加载它们）：\n\n"
-                        + skillBlock + "\n任务指令：\n" + instruction;
+                        + skillBlock + "\n任务指令：\n" + rewritten;
 
         AgentProperties.StructuredOutputMode mode = props.resolveModel(modelName).getStructuredOutputMode();
         // TWO_PHASE / OFF：第一趟不带 schema 跑，让 understand_image 等工具能正常调用
@@ -225,9 +233,10 @@ public class AgentTaskRunner {
             log.warn("unknown permission mode '{}', falling back to BYPASS", runner.getPermissionMode());
             mode = PermissionMode.BYPASS;
         }
+        String sysPrompt = runner.getSysPrompt();
         ReActAgent.Builder builder = ReActAgent.builder()
                 .name(runner.getName())
-                .sysPrompt(runner.getSysPrompt())
+                .sysPrompt(sysPrompt)
                 .model(modelFactory.build(modelName))
                 .toolkit(toolkitFactory.build(taskDir))
                 .permissionContext(PermissionContextState.builder().mode(mode).build())

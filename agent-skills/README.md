@@ -4,7 +4,21 @@
 
 **入库约定**：本目录平时是**部署产物**（各环境的 skill 由运维拷入，不提交，此处默认只保留本说明）。通用的、可复用的示例 skill 模板放 `docs/examples/skills/`（已入库）。
 
-> 印章 / 发票**不是技能**：它们是内置工具 `recognize_seal` / `recognize_invoice`，参数与返回口径写在工具描述里，调用方在 instruction 里直接点名工具即可。早先的两个 SKILL.md 已删除——技能正文会逼模型先 `curl -o` 下载文件，同一份内容出现两个身份，去重失效（实测把 72 页重新 OCR 一遍）。
+> 印章 / 发票 / 身份证 / 营业执照**是技能**（`seal-recognition` / `invoice-recognition` /
+> `idcard-recognition` / `bizlic-recognition`），但它们**随 jar 内置**
+> （`ai-agent-app/src/main/resources/skills/`），不放这个目录。
+> 中间反复过一轮：早先印章/发票是内置工具 `recognize_seal` / `recognize_invoice`，已删除——两套口径会漂移，
+> 而镜像里的 `ips seal` / `ips invoice` / `ips idcard` / `ips bizlic` 已经能给出公司名与全部字段
+> （身份证/营业执照从一开始就没做过内置工具，直接走技能）。技能正文只写「调哪条命令、
+> 返回怎么读、什么算终局结论」。注意 `idcard`/`bizlic` 只收图片，PDF 要走 `extract_document_fields`。
+>
+> 两个坑，改技能前先记住：
+> 1. 指令里的文件 URL 已在任务启动前由 `SourceIngestor` 下载到 `src/`，工具与 CLI 都只吃本地路径。
+>    技能正文若让模型先 `curl -o` 下载，同一份内容就会出现「URL」和「本地副本」两个身份，去重失效
+>    （实测把 72 页重新 OCR 一遍）；`curl`/`wget` 现在也被命令黑名单直接拒掉。
+> 2. 这几项能力依赖 `AGENT_TOOL_SHELL=true`。shell 关掉时技能正文会被加载但命令跑不了，
+>    模型只能空转到迭代上限——环境开关要和技能集一起看。要收紧 shell 就用逐段白名单
+>    `AGENT_SHELL_ALLOWED=ips`（管道仍可用，`cat`/`grep` 之类全被拒），别直接关。
 
 ## 放法
 

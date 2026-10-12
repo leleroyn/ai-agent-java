@@ -257,15 +257,6 @@ public class VisionClient {
     }
 
     /**
-     * 把图片 URL 下载成 data URL。成功返回 {@code data:...}，失败返回以 {@code "Error: "} 开头的可读说明。
-     * 供工具层在「URL 或本地文件」混用时统一成 data URL。
-     */
-    public String dataUrlFromUrl(String url) {
-        ImageData d = downloadAsDataUrl(url, props.getVision());
-        return d.error != null ? d.error : d.dataUrl;
-    }
-
-    /**
      * 读本地图片文件成 data URL。<b>调用方必须已确保路径在任务沙箱内</b>（沙箱校验属于工具层）。
      * 成功返回 {@code data:...}，失败返回以 {@code "Error: "} 开头的说明。
      */

@@ -12,27 +12,32 @@ import java.security.MessageDigest;
 import java.util.List;
 
 /**
- * 「文档来源」统一落地成本地可读文件：http(s) URL 下载到指定临时目录，本地路径必须落在任务沙箱内。
+ * 「文档来源」= 任务沙箱内的本地文件。工具层<b>不再下载任何东西</b>。
  *
- * <p>存在的理由是<b>把下载这件事从模型手里拿走</b>。之前印章/发票只有技能里的 curl 示例，模型只能先
- * {@code curl -o <taskDir>/contract.pdf} 落盘，再把本地路径喂给后续工具——同一份内容于是同时存在
- * 「URL」和「本地副本」两个身份，按来源字符串做的缓存必然 miss，72 页 PDF 被重新 OCR 一遍。
- * 工具自己吃 URL 之后，本地副本根本不会出现。
+ * <p>下载只发生一次，在 agent 启动之前：{@code SourceIngestor} 把指令里的文件 URL 抓成
+ * {@code <taskDir>/src/} 下的本地文件，并把指令里的 URL 原地换成相对路径。之前每条工具路径
+ * （OCR 转文本、印章、发票、PDF 理解、TXT 抽取）各自 {@code http.send}，同一份 30MB 扫描件在
+ * 一个混合任务里被下载 3-4 遍，光下载就 90s+；模型自己 {@code curl -o} 落盘还会让同一内容出现
+ * 「URL」和「本地副本」两个身份，按来源字符串做的复用必然 miss。
  *
  * <p>安全：本地路径经 {@link SandboxPaths} 严格限制在 {@code taskDir} 内，越界一律拒绝；
- * URL 一律先过 {@link #validateUrl} 的 SSRF 主机白名单，下载有体积上限（防 DoS），
- * 落点是调用方给的临时目录，由调用方用完删除。
+ * URL 一律先过 {@link #validateUrl} 的 SSRF 主机白名单，下载有体积上限（防 DoS）。
+ * {@link #download} 是全工程唯一的下载实现，只给 {@code SourceIngestor} 用。
  */
 public final class SourceFiles {
 
     private SourceFiles() {
     }
 
+    /** 工具收到 URL 时的统一错误：告诉模型下一步该传什么，而不是只说「不支持」。 */
+    public static final String URL_REJECTED = "工具不接受 URL。指令里的文件已在任务启动前下载到本任务工作目录的"
+            + " src/ 下，请把来源改成本地相对路径（形如 src/1-文件名.pdf）。";
+
     /**
-     * 解析结果：成功带 {@code file}（{@code temp=true} 表示是下载来的临时文件，调用方须删除），
+     * 解析结果：成功带 {@code file}（一定是任务沙箱内已存在的文件，调用方不得删除），
      * 失败带 {@code error}。
      */
-    public record Fetched(Path file, boolean temp, String error) {
+    public record Fetched(Path file, String error) {
         public boolean ok() {
             return error == null;
         }
@@ -44,35 +49,29 @@ public final class SourceFiles {
             .build();
 
     /**
-     * @param ref      http/https URL，或任务沙箱内的本地路径
-     * @param taskDir  任务沙箱目录，本地路径的边界
-     * @param tempDir  URL 下载的落点；{@code null} 表示落在 {@code taskDir}
-     * @param maxBytes 下载体积上限
-     * @param ssrfAllowlist SSRF 主机白名单（后缀匹配），空=不限制
+     * @param ref     任务沙箱内的本地路径（相对 {@code taskDir} 或 {@code taskDir} 内的绝对路径）
+     * @param taskDir 任务沙箱目录，本地路径的边界
      */
-    public static Fetched fetch(String ref, Path taskDir, Path tempDir,
-                                int maxBytes, List<String> ssrfAllowlist) {
+    public static Fetched fetch(String ref, Path taskDir) {
         if (ref == null || ref.isBlank()) {
-            return new Fetched(null, false, "Error: 未提供来源。");
+            return new Fetched(null, "Error: 未提供来源。");
         }
         String s = ref.trim();
+        if (MediaInputs.isUrl(s)) {
+            return new Fetched(null, "Error: " + URL_REJECTED);
+        }
         try {
-            if (MediaInputs.isUrl(s)) {
-                Path dir = tempDir != null ? tempDir : taskDir;
-                Files.createDirectories(dir);
-                Path target = dir.resolve("src-" + System.nanoTime());
-                return new Fetched(download(validateUrl(s, ssrfAllowlist), target, maxBytes), true, null);
-            }
             Path local = SandboxPaths.resolveWithin(taskDir, s);
             if (local == null) {
-                return new Fetched(null, false, "Error: 本地文件必须在任务工作目录内，已拒绝越界访问：" + s);
+                return new Fetched(null, "Error: 本地文件必须在任务工作目录内，已拒绝越界访问：" + s);
             }
             if (!Files.isRegularFile(local)) {
-                return new Fetched(null, false, "Error: 本地文件不存在：" + s + "（相对本任务工作目录）。");
+                return new Fetched(null, "Error: 本地文件不存在：" + s
+                        + "（相对本任务工作目录）。指令里点名的文件应已就绪在 src/ 下。");
             }
-            return new Fetched(local, false, null);
+            return new Fetched(local, null);
         } catch (Exception e) {
-            return new Fetched(null, false,
+            return new Fetched(null,
                     "Error: 读取来源失败：" + e.getClass().getSimpleName() + ": " + e.getMessage());
         }
     }
@@ -128,7 +127,8 @@ public final class SourceFiles {
         return sb.toString();
     }
 
-    private static Path download(URI uri, Path target, int maxBytes) throws Exception {
+    /** 全工程唯一的下载实现：流式落盘 + 体积上限，只由 {@code SourceIngestor} 在任务启动前调用。 */
+    public static Path download(URI uri, Path target, int maxBytes) throws Exception {
         HttpRequest req = HttpRequest.newBuilder(uri).timeout(java.time.Duration.ofSeconds(180)).GET().build();
         HttpResponse<InputStream> resp = HTTP.send(req, HttpResponse.BodyHandlers.ofInputStream());
         if (resp.statusCode() / 100 != 2) {

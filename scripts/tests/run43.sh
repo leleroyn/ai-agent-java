@@ -15,12 +15,12 @@ docker exec ai-agent-java env | grep -E 'SSRF|TOOL_SHELL|IPS_OCR_TIMEOUT'
 API=http://localhost:8080/api/v1/agent/task
 P72=http://192.168.2.203:8090/files/test/20260920/0914625f63c247c2865a88f0df5dc658.pdf
 
-echo "== D: SSRF reject, shell off =="
+echo "== D: disallowed host rejected at ingest (shell off, agent must not start) =="
 cat > c43.json <<EOF
-{"taskId":"s43-ssrf","instruction":"用 recognize_seal 工具从 http://127.0.0.1:8090/files/test/examples/seal_1.jpg 识别印章，把工具返回原文放进键\"结果\"。最终答案只输出一个 JSON 对象。","options":{"sync":true,"timeoutSeconds":120}}
+{"taskId":"s43-ssrf","instruction":"识别 http://127.0.0.1:8090/files/test/examples/seal_1.jpg 的印章，把印章上的公司名称放入键\"公司\"。最终答案只输出一个 JSON 对象。","skills":["seal-recognition"],"options":{"sync":true,"timeoutSeconds":120}}
 EOF
 curl -s -X POST $API -H "Content-Type: application/json" --data @c43.json > r43.json
-python3 -c "import json;d=json.load(open('r43.json'))['data'];print('D',d['status'],d.get('durationMs'),(d.get('resultText') or d.get('error') or '')[:300])"
+python3 -c "import json;d=json.load(open('r43.json'))['data'];print('D',d['status'],d.get('durationMs'),json.dumps(d.get('error'),ensure_ascii=False)[:300])"
 
 echo "== E: OCR timeout=1 -> expect partial =="
 cat > c43p.json <<EOF

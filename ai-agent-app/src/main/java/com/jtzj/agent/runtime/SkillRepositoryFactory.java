@@ -100,8 +100,8 @@ public class SkillRepositoryFactory {
      *
      * <p>Unknown names are dropped with a WARN rather than rejected. They used to be a 400, which
      * turned into a hard outage for callers that still send a skill name the deployment stopped
-     * shipping: seal/invoice guidance now lives in the {@code recognize_seal} / {@code
-     * recognize_invoice} tool descriptions, so a stale name costs nothing but a log line.
+     * shipping: seal/invoice are skills shipped inside the jar again, so a stale name left by an
+     * old caller costs nothing but a log line.
      *
      * @return the normalised, de-duplicated selection of names that are actually installed
      * @throws AgentException INVALID_REQUEST on bad shape or an over-length list

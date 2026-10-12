@@ -62,7 +62,8 @@ public class DocumentUnderstandTools {
     public ToolResultBlock understand(
             @ToolParam(
                     name = "source",
-                    description = "文档来源，一个或多个，空格或换行分隔。每项是 http/https URL 或本任务工作目录下的本地文件路径（可混用）。"
+                    description = "文档来源，一个或多个，空格或换行分隔。每项必须是本任务工作目录下的文件路径"
+                            + "（指令里点名的文件已在任务启动前就绪在 src/ 下，直接用指令里给的路径）。不接受 URL。"
                             + "按扩展名判定类型：图片(.jpg/.png/.webp/.gif/.bmp)、PDF(.pdf)、TXT(.txt)。",
                     required = true)
             String source,

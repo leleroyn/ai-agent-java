@@ -9,11 +9,13 @@ import java.util.LinkedHashSet;
 import java.util.List;
 
 /**
- * 图片来源解析：把调用方给的 {@code image_urls}（http/https URL 或任务沙箱本地路径，可混用）
- * 统一解析成视觉模型用的 data URL 列表。
+ * 图片来源解析：把调用方给的来源（任务沙箱内的本地文件路径）解析成视觉模型用的 data URL 列表。
+ *
+ * <p>URL 一律拒绝：文件在 agent 启动前已由 {@code SourceIngestor} 抓到 {@code src/} 下，
+ * 工具再下载一次就是同一份 30MB 扫描件重复传输。
  *
  * <p>安全：本地路径被严格限制在该任务沙箱内（{@link SandboxPaths}），越界一律拒绝；本地文件的
- * 源文件不会被删除。URL 与本地文件都走 {@link VisionClient} 的下载/读取 + 魔数判类型。
+ * 源文件不会被删除。读取与魔数判类型走 {@link VisionClient}。
  */
 public final class MediaInputs {
 
@@ -65,9 +67,9 @@ public final class MediaInputs {
     }
 
     /**
-     * @param refs     已 {@link #parse} 的来源列表
+     * @param refs     已 {@link #parse} 的来源列表（必须是沙箱内本地路径）
      * @param max      单次最多张数
-     * @return 成功为 data URL 列表；任一来源非法/越界/下载失败则返回可读错误。
+     * @return 成功为 data URL 列表；任一来源是 URL、非法或越界则返回可读错误。
      */
     public static Result resolveAsDataUrls(VisionClient visionClient, Path taskDir,
                                            List<String> refs, int max) {
@@ -82,17 +84,16 @@ public final class MediaInputs {
         for (String ref : refs) {
             String dataUrl;
             if (isUrl(ref)) {
-                dataUrl = visionClient.dataUrlFromUrl(ref);
-            } else {
-                Path local = SandboxPaths.resolveWithin(taskDir, ref);
-                if (local == null) {
-                    return new Result(null, "Error: 本地图片路径必须在任务工作目录内，已拒绝越界访问：" + ref);
-                }
-                if (!Files.isRegularFile(local)) {
-                    return new Result(null, "Error: 本地图片文件不存在：" + ref + "（相对本任务工作目录）。");
-                }
-                dataUrl = visionClient.dataUrlFromLocalFile(local);
+                return new Result(null, "Error: " + SourceFiles.URL_REJECTED);
             }
+            Path local = SandboxPaths.resolveWithin(taskDir, ref);
+            if (local == null) {
+                return new Result(null, "Error: 本地图片路径必须在任务工作目录内，已拒绝越界访问：" + ref);
+            }
+            if (!Files.isRegularFile(local)) {
+                return new Result(null, "Error: 本地图片文件不存在：" + ref + "（相对本任务工作目录）。");
+            }
+            dataUrl = visionClient.dataUrlFromLocalFile(local);
             if (dataUrl.startsWith("Error:")) {
                 return new Result(null, dataUrl);
             }
