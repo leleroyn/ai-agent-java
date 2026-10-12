@@ -23,7 +23,27 @@ cd "$(dirname "$0")/.."
 export MSYS_NO_PATHCONV=1
 export MSYS2_ARG_CONV_EXCL='*'
 
-IMAGE="${IMAGE:-ai-agent-java:latest}"
+IMAGE_REPO="${IMAGE_REPO:-ai-agent-java}"
+# 默认镜像不写死 latest：生产是 docker load 离线包，包里只有 ai-agent-java:<版本号> 这一个 tag，
+# 写死 latest 会报「本地没有镜像 ai-agent-java:latest」（实测踩过）。解析顺序：
+#   1) pom.xml 的 <version>（与 docker-build.sh 同源），且本地确实有该 tag；
+#   2) 本地已有的 ai-agent-java:<x.y.z> 里版本号最大的那个（服务器上没拷 pom.xml 时走这条）；
+#   3) ai-agent-java:latest（本机刚跑完 docker-build.sh 的场景）。
+pick_image() {
+  local v
+  if [ -f pom.xml ]; then
+    v="$(awk '/<parent>/{p=1} /<\/parent>/{p=0}
+      !p && /<version>/{gsub(/.*<version>|<\/version>.*/,""); print; exit}' pom.xml)"
+    if [ -n "$v" ] && docker image inspect "${IMAGE_REPO}:${v}" >/dev/null 2>&1; then
+      printf '%s:%s' "$IMAGE_REPO" "$v"; return 0
+    fi
+  fi
+  v="$(docker images --format '{{.Tag}}' --filter "reference=${IMAGE_REPO}" \
+        | grep -E '^[0-9]+(\.[0-9]+)+$' | sort -V | tail -1 || true)"
+  if [ -n "$v" ]; then printf '%s:%s' "$IMAGE_REPO" "$v"; return 0; fi
+  printf '%s:latest' "$IMAGE_REPO"
+}
+IMAGE="${IMAGE:-$(pick_image)}"
 NAME="${NAME:-ai-agent-java}"
 PORT="${PORT:-8080}"
 ENV_FILE="${ENV_FILE:-.env}"
@@ -93,7 +113,11 @@ fi
 if [ "${1:-}" = "--build" ]; then
   bash scripts/docker-build.sh
 elif ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
-  echo "ERROR: 本地没有镜像 $IMAGE。先跑 bash scripts/docker-build.sh，或用 --build。" >&2
+  echo "ERROR: 本地没有镜像 $IMAGE。" >&2
+  echo "       本机：先跑 bash scripts/docker-build.sh，或给本脚本加 --build。" >&2
+  echo "       离线包 docker load：tag 只有版本号，用下面列出的实际 tag 重跑，例如" >&2
+  echo "         IMAGE=$IMAGE_REPO:<下面列出的tag> bash scripts/docker-run.sh" >&2
+  docker images "$IMAGE_REPO" --format '  {{.Repository}}:{{.Tag}}  {{.Size}}  created={{.CreatedSince}}' >&2 || true
   exit 1
 fi
 
