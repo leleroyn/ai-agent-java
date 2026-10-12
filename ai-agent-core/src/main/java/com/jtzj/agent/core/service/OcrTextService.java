@@ -241,6 +241,10 @@ public class OcrTextService {
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 texts[i] = "Error: OCR 被中断（页 " + (firstPage + i) + "）";
+                // 剩余槽位显式标注「没跑过」，否则上层只能把 null 当失败原因打出来。
+                for (int j = i + 1; j < texts.length; j++) {
+                    texts[j] = "Error: OCR 未执行（批次在页 " + (firstPage + i) + " 被中断）";
+                }
                 break;
             } catch (Exception e) {
                 texts[i] = "Error: OCR 异常：" + e.getClass().getSimpleName() + ": " + e.getMessage();

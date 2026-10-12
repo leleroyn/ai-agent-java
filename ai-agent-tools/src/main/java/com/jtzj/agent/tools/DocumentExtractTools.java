@@ -173,7 +173,8 @@ public class DocumentExtractTools {
                     + "也不要用 understand_document 补这个字段。请用已有结论作答。";
         }
 
-        log.info("doc extract sources={} usable={} fields={} ocr_failures={}",
+        // source_failures 数的是「整个来源换不成文本」，与页级缺页不是一回事，别叫 ocr_failures。
+        log.info("doc extract sources={} usable={} fields={} source_failures={}",
                 refs.size(), usable, fields.size(), failures.size());
         attempts.bump(txtOfRef);
 
