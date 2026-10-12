@@ -1061,7 +1061,17 @@ public class AgentProperties {
         }
 
         public void setFormat(String format) {
-            this.format = format;
+            String v = format == null ? "" : format.trim().toLowerCase(java.util.Locale.ROOT);
+            this.format = v.isEmpty() ? "md" : v;
+        }
+
+        /**
+         * 实际下发给 OCR 的 format：只有 {@code md} / {@code txt} 两个有效值，其余（拼错、留空）
+         * 一律按 {@code md} 处理。留空不会套用 {@code ${AGENT_IPS_FORMAT:md}} 的默认值——Spring 对
+         * 「变量存在但为空」原样绑空串，不归一化就会向 OCR 端点发 {@code format=""}。
+         */
+        public String effectiveFormat() {
+            return "txt".equals(format) ? "txt" : "md";
         }
 
         public String getAppId() {

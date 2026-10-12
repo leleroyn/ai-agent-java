@@ -155,6 +155,17 @@ public class OcrTextService {
         try (BufferedWriter w = Files.newBufferedWriter(out, StandardCharsets.UTF_8)) {
             for (int a = 1; a <= limit; a += batch) {
                 int b = Math.min(limit, a + batch - 1);
+                // 取消要真的停下来：ocrBatch 里的 break 只跳出取结果的内层循环，不在这里检查的话，
+                // 后续批次还会把剩余页全部栅格化 + 提交一遍，线程池要等整个循环跑完才关。
+                if (Thread.currentThread().isInterrupted()) {
+                    log.warn("ocr->txt aborted at page {}/{}: 线程被中断，剩余 {} 页不再识别",
+                            a, limit, limit - a + 1);
+                    for (int pp = a; pp <= limit; pp++) {
+                        w.write(notRunPage(pp));
+                        failed.add(pp);
+                    }
+                    break;
+                }
                 List<byte[]> pages;
                 try {
                     pages = pdfService.renderPageImages(pdf, a, b, scratch);
@@ -217,6 +228,11 @@ public class OcrTextService {
         return "--- 第 " + page + " 页 OCR 失败（该页内容缺失）---\n";
     }
 
+    /** 中断导致「根本没跑 OCR」的页，与 {@link #missingPage} 的「识别失败」区分开。 */
+    private static String notRunPage(int page) {
+        return "--- 第 " + page + " 页未识别（识别被中断，未执行 OCR）---\n";
+    }
+
     /**
      * 一批页的 OCR。{@code exec} 为空则串行；否则并发提交、按提交顺序取回，
      * 返回值下标 i 对应第 {@code firstPage + i} 页——并发只发生在识别阶段，顺序由这里保证。
@@ -241,9 +257,10 @@ public class OcrTextService {
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 texts[i] = "Error: OCR 被中断（页 " + (firstPage + i) + "）";
-                // 剩余槽位显式标注「没跑过」，否则上层只能把 null 当失败原因打出来。
+                // 剩余槽位显式写原因，否则上层只能把 null 当失败原因打出来。注意这些 future 已经
+                // 提交、可能仍在跑，准确说法是「结果没取回」；整批被中断时外层循环会直接停住。
                 for (int j = i + 1; j < texts.length; j++) {
-                    texts[j] = "Error: OCR 未执行（批次在页 " + (firstPage + i) + " 被中断）";
+                    texts[j] = "Error: OCR 结果未取回（批次在页 " + (firstPage + i) + " 被中断）";
                 }
                 break;
             } catch (Exception e) {

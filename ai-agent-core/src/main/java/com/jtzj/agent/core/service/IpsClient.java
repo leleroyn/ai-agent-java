@@ -15,6 +15,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -44,6 +45,8 @@ public class IpsClient {
     private final AgentProperties props;
     private final ObjectMapper mapper;
     private final HttpClient http;
+    /** format 配错只告警一次：OCR 是按页调的，每页告警会把日志刷满。 */
+    private final AtomicBoolean formatWarned = new AtomicBoolean();
 
     public IpsClient(AgentProperties props,
                      @Qualifier("agentScopeObjectMapper") ObjectMapper mapper) {
@@ -86,7 +89,12 @@ public class IpsClient {
         }
         AgentProperties.Ips c = props.getIps();
         Map<String, String> fields = new LinkedHashMap<>();
-        fields.put("format", c.getFormat() == null ? "txt" : c.getFormat().trim());
+        String format = c.effectiveFormat();
+        if (!format.equals(c.getFormat()) && formatWarned.compareAndSet(false, true)) {
+            log.warn("agent.ips.format 配置值无效：[{}]，按 [{}] 处理（可选值只有 md / txt）",
+                    c.getFormat(), format);
+        }
+        fields.put("format", format);
         fields.put("resize", String.valueOf(c.isResize()));
         fields.put("use_cls", String.valueOf(c.isUseCls()));
         if (c.getAppId() != null && !c.getAppId().isBlank()) {
