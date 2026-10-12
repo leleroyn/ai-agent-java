@@ -377,3 +377,23 @@ agent 用 `execute_shell_command` 直接调。目前只有 `ips`（Rust/musl sta
   反过来，`AGENT_SHELL_ALLOWED=ips` 就是「shell 除 ips 外不能读本地文件」的配法，见上面校验器那条。
 
 缓存只增不减，需要时清理：`docker exec ai-agent-java find /workspace/.ips-cache -mtime +30 -delete`。
+
+
+## 13. 逐页 OCR 的并发结构（滑动窗口）
+
+抽取类任务的 PDF 走「逐页 OCR → 同名 txt → 按块抽取」。逐页而不是一次性：一次请求换整份文本容易超时，
+逐页则每页一次小请求，中途失败也已留下前面页的文本。
+
+- 结构：按 `agent.pdf.pages-per-call` 分批**栅格化**，OCR 提交进 `agent.pdf.ocr-parallelism` 个 worker 的
+  **滑动窗口**——栅格化与识别重叠，写盘严格按页序（`futures` 下标 = 页号-1；栅格化失败的页放占位 future
+  保住这个对应关系，否则写盘会错位）。在途页上限 `3 × ocr-parallelism`，超过就按页序先写一段，避免整份
+  PDF 的页图堆在内存里（200 页 × ~400KB）。
+- 为什么不是「一批识别完再下一批」：实测 72 页扫描件（30MB）按 6 页一批 + 4 worker 跑，每批变成 4+2 两波，
+  第二波 2 个槽空转，12 批白烧约 40s——配 4 并发实际只有 2.8 有效并发（单页 OCR mean 6.7s、串行总量 488.8s、
+  墙钟 174.2s）。
+- 改滑动窗口 + `ocr-parallelism=6` 后同一份文件：`ocr→txt pdf pages=72/72 failed=[] chars=60422` **118.7s**，
+  任务 204.9s → **153.4s**，字段全对。IPS 服务端不是瓶颈（154KB 图 8 并发 wall 2.6s，近线性）。
+- 对照视觉路径 `understand_document`：同一份 72 页扫描件 24 批 × 3 页、并发 2 → 126.0s。它一开始就把所有批
+  提交进线程池（`PdfService.runBatches`），没有栅栏损耗——这正是当初「OCR 反而比视觉慢」的原因。
+- 中断语义保留：每批开头查线程中断；已提交但未完成的页与未提交的页都写 `notRunPage`，随后 `shutdownNow()`。
+- 配置：`AGENT_PDF_OCR_PARALLELISM` 建议 6（生产原值 2）。页数 <= 2 仍强制串行（`PARALLEL_ABOVE_PAGES`）。

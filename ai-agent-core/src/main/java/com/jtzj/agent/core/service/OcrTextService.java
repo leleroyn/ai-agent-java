@@ -3,6 +3,7 @@ package com.jtzj.agent.core.service;
 import com.jtzj.agent.core.config.AgentProperties;
 import com.jtzj.agent.core.support.SourceFiles;
 import java.io.BufferedWriter;
+import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -10,6 +11,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -25,8 +27,9 @@ import org.springframework.stereotype.Component;
  * 而字段抽取要的正是这些值。页型探测 + 视觉/OCR 双通道那套判定链因此整体消失。
  *
  * <p>PDF <b>逐页 OCR、边识别边追加</b>到同一个 txt：一次请求换整份文本容易超时，逐页则每页一次
- * 小请求，中途失败也已留下前面页的文本。页数 &gt; 2 时用 2 个并发 worker，但<b>写入严格按页序</b>
- * （一批内先全部识别完、再按页号顺序落盘）。每页前写 {@code --- 第 N 页 ---} 便于溯源。
+ * 小请求，中途失败也已留下前面页的文本。页数 &gt; 2 时用 {@code agent.pdf.ocr-parallelism} 个 worker 跑
+ * <b>滑动窗口</b>（在途页数恒定，栅格化与识别重叠），但<b>写入严格按页序</b>。每页前写
+ * {@code --- 第 N 页 ---} 便于溯源。
  * 图片一次 OCR。
  *
  * <p><b>同一份内容只 OCR 一次</b>：txt 文件名带内容的 SHA-256 前缀，所以同一份文件不管被点名几次、
@@ -134,9 +137,14 @@ public class OcrTextService {
     }
 
     /**
-     * PDF：按 {@code agent.pdf.pages-per-call} 分批栅格化，每批内 OCR（页数 &gt; 2 时 2 并发），
-     * 一批识别完再按页号顺序追加写入同一个 txt。单页失败写一行显式缺口标记并继续；
-     * 全部失败才报错。有失败页时产物改名带 {@link #PARTIAL_SUFFIX}，下次调用不复用、重跑。
+     * PDF：按 {@code agent.pdf.pages-per-call} 分批栅格化，OCR 用<b>滑动窗口</b>提交进
+     * {@code agent.pdf.ocr-parallelism} 个 worker——栅格化与识别重叠，写盘严格按页序。
+     * 单页失败写一行显式缺口标记并继续；全部失败才报错。有失败页时产物改名带 {@link #PARTIAL_SUFFIX}，
+     * 下次调用不复用、重跑。
+     *
+     * <p>为什么不是「一批识别完再下一批」：实测 72 页扫描件按 6 页一批 + 4 worker 跑，每批变成 4+2 两波，
+     * 第二波 2 个槽空转，12 批白烧约 40s——配 4 并发实际只跑到 2.8。改成滑动窗口后在途页数恒定，
+     * 栅格化也不再卡在两批之间。
     */
     /** @return 失败原因；{@code null} 表示成功 */
     private String ocrPdfPerPage(Path pdf, Path out, Path partialOut, String source, Path scratch)
@@ -145,25 +153,27 @@ public class OcrTextService {
         int maxPages = props.getPdfs().getMaxPages();
         int limit = Math.min(total, Math.max(1, maxPages));
         int batch = Math.max(1, props.getPdfs().getPagesPerCall());
-        int parallelism = props.getPdfs().getOcrParallelism();
+        int parallelism = Math.max(1, props.getPdfs().getOcrParallelism());
         boolean parallel = limit > PARALLEL_ABOVE_PAGES && parallelism > 1;
+        // 在途页上限：超过就先把最老的页取回写盘，避免整份 PDF 的页图都堆在内存里（200 页 × ~400KB）。
+        int window = parallel ? parallelism * 3 : 1;
         List<Integer> failed = new ArrayList<>();
         int ok = 0;
         int chars = 0;
         long started = System.currentTimeMillis();
         ExecutorService exec = parallel ? Executors.newFixedThreadPool(parallelism) : null;
+        List<Future<String>> futures = new ArrayList<>(limit);
+        int written = 0;
+        boolean aborted = false;
         try (BufferedWriter w = Files.newBufferedWriter(out, StandardCharsets.UTF_8)) {
             for (int a = 1; a <= limit; a += batch) {
                 int b = Math.min(limit, a + batch - 1);
-                // 取消要真的停下来：ocrBatch 里的 break 只跳出取结果的内层循环，不在这里检查的话，
-                // 后续批次还会把剩余页全部栅格化 + 提交一遍，线程池要等整个循环跑完才关。
+                // 取消要真的停下来：这里不检查的话，后续批次还会把剩余页全部栅格化 + 提交一遍，
+                // 线程池要等整个循环跑完才关。
                 if (Thread.currentThread().isInterrupted()) {
                     log.warn("ocr->txt aborted at page {}/{}: 线程被中断，剩余 {} 页不再识别",
                             a, limit, limit - a + 1);
-                    for (int pp = a; pp <= limit; pp++) {
-                        w.write(notRunPage(pp));
-                        failed.add(pp);
-                    }
+                    aborted = true;
                     break;
                 }
                 List<byte[]> pages;
@@ -171,33 +181,41 @@ public class OcrTextService {
                     pages = pdfService.renderPageImages(pdf, a, b, scratch);
                 } catch (Exception e) {
                     log.warn("rasterize pages {}-{} failed: {}", a, b, e.toString());
-                    for (int p = a; p <= b; p++) {
-                        w.write(missingPage(p));
-                        failed.add(p);
+                    // 占位 future 保住「下标 = 页号-1」这个对应关系，写盘顺序才不会错位。
+                    for (int pp = a; pp <= b; pp++) {
+                        futures.add(CompletableFuture.completedFuture(
+                                "Error: 栅格化失败：" + e.getClass().getSimpleName()));
                     }
                     continue;
                 }
-                String[] texts = ocrBatch(pages, a, exec);
-                for (int i = 0; i < texts.length; i++) {
-                    int page = a + i;
-                    String text = texts[i];
-                    if (text == null || text.startsWith("Error:")) {
-                        log.warn("ocr page {} failed: {}", page, text);
-                        w.write(missingPage(page));
-                        failed.add(page);
-                        continue;
-                    }
-                    w.write("--- 第 " + page + " 页 ---\n");
-                    w.write(text);
-                    if (!text.endsWith("\n")) {
-                        w.write("\n");
-                    }
-                    ok++;
-                    chars += text.length();
+                for (int i = 0; i < pages.size(); i++) {
+                    final byte[] image = pages.get(i);
+                    final String filename = "page-" + (a + i) + ".jpg";
+                    futures.add(parallel
+                            ? exec.submit(() -> ipsClient.ocr(image, filename))
+                            : CompletableFuture.completedFuture(ipsClient.ocr(image, filename)));
                 }
-                w.flush();
-                log.info("ocr->txt page {}/{} ok={} chars={} parallel={} elapsed={}ms",
-                        b, limit, ok, chars, parallel, System.currentTimeMillis() - started);
+                // 背压：在途页够多就按页序先写一段，写盘顺序始终等于页序。
+                while (futures.size() - written > window) {
+                    int[] r = writePage(w, futures.get(written), written + 1, failed);
+                    ok += r[0];
+                    chars += r[1];
+                    written++;
+                }
+                log.info("ocr->txt submitted {}/{} written={} ok={} chars={} parallel={} elapsed={}ms",
+                        b, limit, written, ok, chars, parallel, System.currentTimeMillis() - started);
+            }
+            for (int p = written + 1; p <= limit; p++) {
+                int idx = p - 1;
+                Future<String> f = idx < futures.size() ? futures.get(idx) : null;
+                if (f == null || (aborted && !f.isDone())) {
+                    w.write(notRunPage(p));
+                    failed.add(p);
+                    continue;
+                }
+                int[] r = writePage(w, f, p, failed);
+                ok += r[0];
+                chars += r[1];
             }
             if (total > limit) {
                 w.write("--- 说明：文档共 " + total + " 页，只识别了前 " + limit + " 页 ---\n");
@@ -234,41 +252,34 @@ public class OcrTextService {
     }
 
     /**
-     * 一批页的 OCR。{@code exec} 为空则串行；否则并发提交、按提交顺序取回，
-     * 返回值下标 i 对应第 {@code firstPage + i} 页——并发只发生在识别阶段，顺序由这里保证。
+     * 取回一页的识别结果并按页序落盘。返回 {@code [是否成功, 字符数]}；
+     * 失败页写一行显式缺口并记入 {@code failed}，不中断整份识别。
     */
-    private String[] ocrBatch(List<byte[]> pages, int firstPage, ExecutorService exec) {
-        String[] texts = new String[pages.size()];
-        if (exec == null) {
-            for (int i = 0; i < pages.size(); i++) {
-                texts[i] = ipsClient.ocr(pages.get(i), "page-" + (firstPage + i) + ".jpg");
-            }
-            return texts;
+    private int[] writePage(BufferedWriter w, Future<String> f, int page, List<Integer> failed)
+            throws IOException {
+        String text;
+        try {
+            text = f.get();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            text = "Error: OCR 被中断（页 " + page + "）";
+        } catch (Exception e) {
+            text = "Error: OCR 异常：" + e.getClass().getSimpleName() + ": " + e.getMessage();
         }
-        List<Future<String>> futures = new ArrayList<>(pages.size());
-        for (int i = 0; i < pages.size(); i++) {
-            final byte[] image = pages.get(i);
-            final String filename = "page-" + (firstPage + i) + ".jpg";
-            futures.add(exec.submit(() -> ipsClient.ocr(image, filename)));
+        if (text == null || text.startsWith("Error:")) {
+            log.warn("ocr page {} failed: {}", page, text);
+            w.write(missingPage(page));
+            failed.add(page);
+            return new int[]{0, 0};
         }
-        for (int i = 0; i < futures.size(); i++) {
-            try {
-                texts[i] = futures.get(i).get();
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                texts[i] = "Error: OCR 被中断（页 " + (firstPage + i) + "）";
-                // 剩余槽位显式写原因，否则上层只能把 null 当失败原因打出来。注意这些 future 已经
-                // 提交、可能仍在跑，准确说法是「结果没取回」；整批被中断时外层循环会直接停住。
-                for (int j = i + 1; j < texts.length; j++) {
-                    texts[j] = "Error: OCR 结果未取回（批次在页 " + (firstPage + i) + " 被中断）";
-                }
-                break;
-            } catch (Exception e) {
-                texts[i] = "Error: OCR 异常：" + e.getClass().getSimpleName() + ": " + e.getMessage();
-            }
+        w.write("--- 第 " + page + " 页 ---\n");
+        w.write(text);
+        if (!text.endsWith("\n")) {
+            w.write("\n");
         }
-        return texts;
+        return new int[]{1, text.length()};
     }
+
 
     /** pdftoppm 中途失败可能留下页图，统一清掉（正常路径 rasterizeBytes 读完即删）。 */
     private static void cleanPageImages(Path dir) {
