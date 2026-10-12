@@ -48,6 +48,9 @@ public class CallbackNotifier {
         this.store = store;
         this.jackson2 = jackson2;
         this.httpClient = HttpClient.newBuilder()
+                // 强制 HTTP/1.1：默认 HTTP_2 会在明文 http 上先发 h2c 升级头（Upgrade: h2c + HTTP2-Settings），
+                // uvicorn 系服务不认，会把请求当非法/空 body 处理（422 file missing、400 Invalid HTTP request received）。
+                .version(HttpClient.Version.HTTP_1_1)
                 .connectTimeout(DEFAULT_TIMEOUT)
                 .followRedirects(HttpClient.Redirect.NEVER)
                 .build();
