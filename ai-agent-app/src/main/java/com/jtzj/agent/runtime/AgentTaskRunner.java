@@ -93,15 +93,16 @@ public class AgentTaskRunner {
      * @param skills      skill names to expose, or empty for every installed skill
      * @param modelName   main-model profile to use (flash / pro); null/blank = default
      * @param budget      wall-clock limit including tool execution
+     * @param sync        调用方是否在阻塞等结果；true 时长 PDF 在落盘时就裁成首尾各 5 页
      * @throws AgentException on timeout, interruption, or agent failure
      */
     public RunOutcome run(String taskId, String instruction, JsonNode schema,
-                          List<String> skills, Duration budget, String modelName) {
+                          List<String> skills, Duration budget, String modelName, boolean sync) {
         Path taskDir = workspaceFactory.create(taskId);
         try {
             // 指令里的文件 URL 先抓成 src/ 下的本地文件，并把指令里的 URL 换成相对路径：
             // 工具只吃本地路径，同一份 30MB 扫描件不会在一条任务里被下载好几遍。
-            String rewritten = sourceIngestor.ingest(instruction, taskDir).instruction();
+            String rewritten = sourceIngestor.ingest(instruction, taskDir, sync).instruction();
             return runInWorkspace(taskId, instruction, rewritten, schema, skills, budget, modelName, taskDir);
         } finally {
             // 唯一的清理开关：true 时整个任务目录（含 src/、.ocr/、.ingest/）一起删，

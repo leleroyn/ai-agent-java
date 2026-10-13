@@ -7,6 +7,7 @@ import com.jtzj.agent.core.config.AgentProperties;
 import com.jtzj.agent.core.error.AgentException;
 import com.jtzj.agent.core.error.ErrorCodes;
 import com.jtzj.agent.core.support.MediaInputs;
+import com.jtzj.agent.core.support.PageWindow;
 import com.jtzj.agent.core.support.SourceFiles;
 import java.net.URI;
 import java.nio.file.Files;
@@ -73,7 +74,7 @@ public class SourceIngestor {
     }
 
     /** 一个已就绪的来源。{@code path} 是相对任务目录的路径，直接喂给工具。 */
-    public record Entry(String url, String path, long bytes, String sha256) {
+    public record Entry(String url, String path, long bytes, String sha256, Integer pagesOriginal) {
     }
 
     /** 改写结果：{@code instruction} 里 URL 已换成本地路径；{@code entries} 为空表示没动过。 */
@@ -84,7 +85,7 @@ public class SourceIngestor {
      * @throws AgentException SOURCE_UNAVAILABLE 当某个文件 URL 抓不下来（4xx/超限不重试，
      *                        5xx/超时/网络错误可重试）
      */
-    public Ingested ingest(String instruction, Path taskDir) {
+    public Ingested ingest(String instruction, Path taskDir, boolean sync) {
         if (instruction == null || instruction.isBlank()) {
             return new Ingested(instruction, List.of());
         }
@@ -102,11 +103,17 @@ public class SourceIngestor {
             Path target = srcDir.resolve(name);
             long bytes;
             String sha;
+            // 同步调用：调用方正阻塞等结果，长 PDF 在这一步就裁成首尾各 5 页，
+            // 后面所有工具（OCR / 理解 / ips CLI）看到的都是裁过的文件。
+            int pagesOriginal = -1;
             try {
                 Files.createDirectories(srcDir);
                 // 抓取通道只有一条，SSRF 主机白名单也必须在这条上生效
                 URI uri = SourceFiles.validateUrl(url, props.getPdfs().getSsrfAllowlist());
                 SourceFiles.download(uri, target, props.getPdfs().getMaxDownloadBytes());
+                if (sync && name.toLowerCase(Locale.ROOT).endsWith(".pdf")) {
+                    pagesOriginal = PageWindow.truncateToEdges(target, srcDir);
+                }
                 bytes = Files.size(target);
                 sha = SourceFiles.sha256(target);
             } catch (Exception e) {
@@ -122,9 +129,10 @@ public class SourceIngestor {
                                 + ": " + e.getMessage() + "）", retryable(e), e);
             }
             String relative = SRC_DIR + "/" + name;
-            entries.add(new Entry(url, relative, bytes, sha));
-            log.info("ingest ok task={} url={} -> {} bytes={} sha256={}",
-                    taskDir.getFileName(), url, relative, bytes, sha.substring(0, 12));
+            entries.add(new Entry(url, relative, bytes, sha, pagesOriginal > 0 ? pagesOriginal : null));
+            log.info("ingest ok task={} url={} -> {} bytes={} sha256={} pdf_pages_original={}",
+                    taskDir.getFileName(), url, relative, bytes, sha.substring(0, 12),
+                    pagesOriginal > 0 ? pagesOriginal : "-");
         }
         // 改写放在下载之后，且长 URL 先替换：短 URL 可能是长 URL 的前缀
         // （http://h/a.pdf 与 http://h/a.pdf?v=1），先替换短的会把长的那条截断。
@@ -184,7 +192,21 @@ public class SourceIngestor {
             sb.append(' ').append(e.path()).append("（").append(e.bytes()).append(" 字节）;");
         }
         sb.append(" 工具不接受 URL，也不得用 shell 下载。）");
-        return sb.toString();
+        List<String> windowed = new ArrayList<>();
+        for (Entry e : entries) {
+            if (e.pagesOriginal() != null) {
+                windowed.add(e.path() + "（原 " + e.pagesOriginal() + " 页，现在只剩 " + PageWindow.describe(e.pagesOriginal()) + "）");
+            }
+        }
+        if (windowed.isEmpty()) {
+            return sb.toString();
+        }
+        // 文件被裁过必须显式告诉模型：否则它会把「中间页没进文件」读成「全文没有这个字段」。
+        // 取值口径不变（找不到写 null），但不许声称遍历过全文。
+        String extra = "\n\n（系统说明：本次是同步调用，为控制等待时间，PDF 已就地裁剪："
+                + String.join("、", windowed)
+                + "。文件里就是这些页，中间页不在文件内；不得声称已看过全文，找不到的字段照常写 null。）";
+        return sb + extra;
     }
 
     private void writeManifest(Path taskDir, List<Entry> entries) {
@@ -198,6 +220,9 @@ public class SourceIngestor {
                 node.put("path", e.path());
                 node.put("bytes", e.bytes());
                 node.put("sha256", e.sha256());
+                if (e.pagesOriginal() != null) {
+                    node.put("pages_original", e.pagesOriginal());
+                }
             }
             Files.writeString(dir.resolve("manifest.json"), mapper.writerWithDefaultPrettyPrinter()
                     .writeValueAsString(array));

@@ -87,7 +87,7 @@ accepted ────────────────► running ───�
 | `outputSchema` | object | 否 | JSON Schema。提供则强制返回符合该 schema 的 JSON 到 `data.result`；不提供则自由文本放 `data.resultText` |
 | `skills` | string[] | 否 | 指定启用的技能名（见 `GET /skills`，大小写敏感）。不提供＝所有已安装技能可见；提供则这些技能正文被直接注入并强制生效。未安装的名字被忽略并记 WARN（不报错）。≤ 8 个 |
 | `model` | string | 否 | 主模型 profile（`flash` / `pro`，具体端点由部署配置）。不提供＝用默认（`agent.default-model`，当前 `flash`）；填未知 profile 名返回 `code=1001`，不静默回落。 |
-| `options.sync` | boolean | 否 | true＝阻塞等到终态；false（默认）＝立即返回，由调用方轮询 |
+| `options.sync` | boolean | 否 | true＝阻塞等到终态；false（默认）＝立即返回，由调用方轮询。true 时 PDF 来源只取首尾各 5 页（见 DESIGN §11） |
 | `options.timeoutSeconds` | int | 否 | 执行预算，默认 120，上限 900。**从 worker 领取任务时开始计时，不含排队** |
 | `metadata` | object | 否 | 业务上下文，服务端不解释，会**原样回显**（含嵌套结构）于所有响应。≤ 8192 字符 |
 | `callbackUrl` | string | 否 | 任务终态后服务端 POST JSON 到该地址。必须以 `http://` 或 `https://` 开头，≤ 1024 字符。投递结果记录在数据库 `callback_status` 列（见 §3A） |
@@ -158,7 +158,14 @@ curl -X POST http://localhost:8080/api/v1/agent/task \
 
 ### 3.3 同步提交
 
-带 `"options": { "sync": true, "timeoutSeconds": 90 }`。跑完返回（HTTP 200）：
+带 `"options": { "sync": true, "timeoutSeconds": 90 }`。
+
+**同步请求对 PDF 只取首尾各 5 页**：调用方在阻塞等结果，72 页扫描件光 OCR 就要 180-300s，必然顶到超时。
+文件在下载到任务目录时就地裁剪，之后所有工具（抽取、理解、印章、发票）看到的都是裁过的文件；
+返回的 `resultText` 里找不到某字段时，写 `null`，含义是「首尾这些页里没有」，不是「全文没有」。
+页数不超过 10 的 PDF 不受影响，异步请求也不裁剪。实测同一份 72 页扫描件：同步 24.4s、异步 207.7s，字段结论一致。
+
+跑完返回（HTTP 200）：
 
 ```json
 {

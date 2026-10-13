@@ -309,8 +309,10 @@ public class TaskPoller implements DisposableBean {
                 return;
             }
 
+            // 同步标记要传下去：调用方正阻塞等，PDF 只处理首尾各 5 页（见 PageWindow）。
             AgentTaskRunner.RunOutcome outcome = runner.run(taskId, task.getInstruction(),
-                    schema, splitSkills(task.getSkillNames()), budget, task.getModelName());
+                    schema, splitSkills(task.getSkillNames()), budget, task.getModelName(),
+                    Boolean.TRUE.equals(task.getSyncRequested()));
 
             long durationMs = System.currentTimeMillis() - startMillis;
             Long inputTokens = null;
