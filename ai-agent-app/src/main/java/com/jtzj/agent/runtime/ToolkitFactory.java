@@ -220,15 +220,18 @@ public class ToolkitFactory {
     /**
      * Register one tool, retrying once and then degrading instead of failing the whole task.
      *
-     * <p>AgentScope 2.0.3 builds parameter schemas with victools + Jackson 2.21. Introspecting
-     * {@code TodoTools$TodoItem} (an explicit {@code @JsonCreator} type) can lose an internal
-     * race when several workers assemble toolkits at the same time under the Spring Boot fat
-     * jar, surfacing as
+     * <p>AgentScope 2.0.3 built parameter schemas with victools + Jackson 2.21 through one shared
+     * {@code SchemaGenerator} whose Jackson introspection cache was unsynchronized. Introspecting
+     * {@code TodoTools$TodoItem} (an explicit {@code @JsonCreator} type) could lose an internal race
+     * when several workers assembled toolkits at the same time under the Spring Boot fat jar,
+     * surfacing as
      * <em>"Conflicting property-based creators: already had explicit creator ... encountered
-     * another"</em>. Measured: one task out of six died this way while its five siblings were
-     * fine, and the same registration never failed in isolation. Once introspection is cached a
-     * retry succeeds, so retry first; if it still fails, drop only that tool so the task can
-     * run rather than reporting a spurious execution failure.
+     * another"</em>. Measured: one task out of six died this way while its five siblings were fine,
+     * and the same registration never failed in isolation.
+     * 2.0.4 serializes that generator behind a lock in {@code JsonSchemaUtils}, so the race is fixed
+     * upstream. The retry-then-degrade path stays as a cheap safety net: once introspection is cached
+     * a retry succeeds, and if a registration still fails only that tool is dropped so the task runs
+     * rather than reporting a spurious execution failure.
      */
     private void register(Toolkit toolkit, Object tool, String name, List<String> registered) {
         try {

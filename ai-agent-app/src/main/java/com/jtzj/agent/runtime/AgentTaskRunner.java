@@ -8,6 +8,7 @@ import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.UserMessage;
 import io.agentscope.core.model.ChatUsage;
+import io.agentscope.core.model.ExecutionConfig;
 import io.agentscope.core.permission.PermissionContextState;
 import io.agentscope.core.permission.PermissionMode;
 import java.nio.file.Path;
@@ -121,7 +122,7 @@ public class AgentTaskRunner {
                                       JsonNode schema, List<String> skills, Duration budget,
                                       String modelName, Path taskDir) {
         Set<String> invokedTools = ConcurrentHashMap.newKeySet();
-        ReActAgent agent = newAgent(taskDir, skills, modelName, invokedTools);
+        ReActAgent agent = newAgent(taskDir, skills, modelName, invokedTools, budget);
         RuntimeContext ctx = RuntimeContext.builder()
                 .sessionId("task-" + taskId)
                 .userId("agent-service")
@@ -204,7 +205,7 @@ public class AgentTaskRunner {
         }
         log.warn("task {} used no tool for a document instruction; retrying once with a forced tool call", taskId);
         invokedTools.clear();
-        ReActAgent retry = newAgent(taskDir, skills, modelName, invokedTools);
+        ReActAgent retry = newAgent(taskDir, skills, modelName, invokedTools, left);
         String nudged = prompt + "\n\n强制要求：本任务涉及的文件必须先通过工具读取（extract_document_fields / "
                 + "understand_document，或匹配技能规定的接口调用）。没有工具返回的内容时不得给出任何字段值，"
                 + "缺失字段一律写 null。";
@@ -225,7 +226,7 @@ public class AgentTaskRunner {
     }
 
     private ReActAgent newAgent(Path taskDir, List<String> skills, String modelName,
-                                Set<String> invokedTools) {
+                                Set<String> invokedTools, Duration toolTimeout) {
         AgentProperties.Runner runner = props.getRunner();
         PermissionMode mode;
         try {
@@ -242,7 +243,16 @@ public class AgentTaskRunner {
                 .toolkit(toolkitFactory.build(taskDir))
                 .permissionContext(PermissionContextState.builder().mode(mode).build())
                 .maxIters(runner.getMaxIters())
-                .hook(new ToolUsageHook(invokedTools));
+                .middleware(new ToolUsageMiddleware(invokedTools));
+
+        // AgentScope applies ExecutionConfig.TOOL_DEFAULTS (5 min per tool call, no retry) to
+        // every tool call unless the agent overrides it. Our task budgets are longer than that,
+        // so the framework used to cut a long OCR off mid-run and hand the model a truncated
+        // result to answer from. The timeout is therefore raised to the task's own wall clock:
+        // the per-stage timeouts inside the document tools stay the real governors, and the
+        // wall-clock await above still reports AGENT_TIMEOUT for the task as a whole.
+        builder.toolExecutionConfig(
+                ExecutionConfig.builder().timeout(toolTimeout).maxAttempts(1).build());
 
         // Skills flow through repositories, not SkillBox: skillBox(...) is deprecated in 2.0, and
         // the DynamicSkillMiddleware that skillRepository(...) installs rewrites the
