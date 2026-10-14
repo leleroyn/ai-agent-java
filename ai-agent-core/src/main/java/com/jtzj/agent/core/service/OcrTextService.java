@@ -124,7 +124,7 @@ public class OcrTextService {
     /** @return 失败原因；{@code null} 表示成功 */
     private String ocrWholeFile(Path file, Path out, String source) throws Exception {
         byte[] bytes = Files.readAllBytes(file);
-        String text = ipsClient.ocr(bytes, file.getFileName().toString(), isPdf(file));
+        String text = ipsClient.ocr(bytes, file.getFileName().toString());
         if (text.startsWith("Error:")) {
             return text;
         }
@@ -190,10 +190,10 @@ public class OcrTextService {
                 }
                 for (int i = 0; i < pages.size(); i++) {
                     final byte[] image = pages.get(i);
-                    final String filename = "page-" + (a + i) + ".jpg";
+                    final String filename = "page-" + (a + i) + ".pdf.jpg";
                     futures.add(parallel
-                            ? exec.submit(() -> ipsClient.ocr(image, filename, true))
-                            : CompletableFuture.completedFuture(ipsClient.ocr(image, filename, true)));
+                            ? exec.submit(() -> ipsClient.ocr(image, filename))
+                            : CompletableFuture.completedFuture(ipsClient.ocr(image, filename)));
                 }
                 // 背压：在途页够多就按页序先写一段，写盘顺序始终等于页序。
                 while (futures.size() - written > window) {

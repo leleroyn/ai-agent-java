@@ -80,18 +80,19 @@ public class IpsClient {
      * 页码就对不上了，而抽取结果必须带准确页码。
      *
      * @param fileBytes 图片或 PDF 二进制
-     * @param filename  multipart 里的文件名（服务端按魔数判类型，名字只为可读性）
-     * @param pdf       这份字节是否来自 PDF（PDF 逐页栅格化后上传的也是图片，只能由调用方告知）
+     * @param filename  multipart 里的文件名（服务端按魔数判类型，名字只为可读性）；
+     *                  名字含 {@code .pdf}（含 PDF 页图 {@code page-N.pdf.jpg}）走 mix，其余走 md
      * @return 识别文本（空串是合法结果：该页没有文字）；失败返回 {@code "Error: ..."}
      */
-    public String ocr(byte[] fileBytes, String filename, boolean pdf) {
+    public String ocr(byte[] fileBytes, String filename) {
         if (!isEnabled()) {
             return "Error: OCR 通道未启用（agent.ips.enabled=false 或未配 agent.ips.base-url）。";
         }
         AgentProperties.Ips c = props.getIps();
         Map<String, String> fields = new LinkedHashMap<>();
-        // format 写死不配：PDF 用 mix，其余（图片）用 md。
-        fields.put("format", pdf ? "mix" : "md");
+        // format 写死不配：PDF（含逐页栅格化的 page-N.pdf.jpg）用 mix，其余（图片）用 md。
+        String n = filename == null ? "" : filename.toLowerCase(java.util.Locale.ROOT);
+        fields.put("format", n.contains(".pdf") ? "mix" : "md");
         fields.put("resize", String.valueOf(c.isResize()));
         fields.put("use_cls", String.valueOf(c.isUseCls()));
         if (c.getAppId() != null && !c.getAppId().isBlank()) {
