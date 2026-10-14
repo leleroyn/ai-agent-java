@@ -184,7 +184,7 @@ ai-agent-java/                         Maven 父工程 (packaging=pom, groupId c
 | `agent.execution` | `async-concurrency`(1) `sync-concurrency`(1) `default-timeout-seconds`(120) `max-timeout-seconds`(900) `lease-seconds`(90) `lease-reap-seconds`(30) `max-attempts`(2) `poll-interval-ms` `claim-peek` `max-queued-tasks`(1000) |
 | `agent.tools.*` | 自定义工具按 provider 名开关（默认开）+ 框架内置 `shell/read-file/write-file/todo` + `working-dir` `shell-allowed-commands` `delete-workspace-on-finish` |
 | `agent.pdfs` | `enabled` `pages-per-call` `concurrency` `ocr-parallelism` `understand-parallelism` `max-pages` `max-image-dimension` `jpeg-quality` `timeout-seconds` `max-download-bytes` `text-chunk-size` `text-chunk-overlap` `ssrf-allowlist` |
-| `agent.ips` | 综合服务平台，Java 侧只剩 OCR：`enabled` `base-url` `ocr-timeout-seconds` `rasterize-dpi` `max-image-dimension` `jpeg-quality` `resize` `use-cls` `format` `app-id`。印章/发票走镜像内置 `ips` CLI，其超时是 OS 变量 `IPS_TIMEOUT_SECONDS`（不在 Spring 配置里） |
+| `agent.ips` | 综合服务平台，Java 侧只剩 OCR：`enabled` `base-url` `ocr-timeout-seconds` `rasterize-dpi` `max-image-dimension` `jpeg-quality` `resize` `use-cls` `app-id`（OCR 的 format 写死：PDF 用 mix、图片用 md，不再配置）。印章/发票走镜像内置 `ips` CLI，其超时是 OS 变量 `IPS_TIMEOUT_SECONDS`（不在 Spring 配置里） |
 | `agent.skills` | `enabled` `directory` `classpath-location` `code-execution-enabled` `max-requested` `max-inline-chars` |
 
 数据源：`serverTimezone=Asia/Shanghai`（见 §5 时间说明）。

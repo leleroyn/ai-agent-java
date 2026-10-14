@@ -15,7 +15,6 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -45,8 +44,6 @@ public class IpsClient {
     private final AgentProperties props;
     private final ObjectMapper mapper;
     private final HttpClient http;
-    /** format 配错只告警一次：OCR 是按页调的，每页告警会把日志刷满。 */
-    private final AtomicBoolean formatWarned = new AtomicBoolean();
 
     public IpsClient(AgentProperties props,
                      @Qualifier("agentScopeObjectMapper") ObjectMapper mapper) {
@@ -84,20 +81,17 @@ public class IpsClient {
      *
      * @param fileBytes 图片或 PDF 二进制
      * @param filename  multipart 里的文件名（服务端按魔数判类型，名字只为可读性）
+     * @param pdf       这份字节是否来自 PDF（PDF 逐页栅格化后上传的也是图片，只能由调用方告知）
      * @return 识别文本（空串是合法结果：该页没有文字）；失败返回 {@code "Error: ..."}
      */
-    public String ocr(byte[] fileBytes, String filename) {
+    public String ocr(byte[] fileBytes, String filename, boolean pdf) {
         if (!isEnabled()) {
             return "Error: OCR 通道未启用（agent.ips.enabled=false 或未配 agent.ips.base-url）。";
         }
         AgentProperties.Ips c = props.getIps();
         Map<String, String> fields = new LinkedHashMap<>();
-        String format = c.effectiveFormat();
-        if (!format.equals(c.getFormat()) && formatWarned.compareAndSet(false, true)) {
-            log.warn("agent.ips.format 配置值无效：[{}]，按 [{}] 处理（可选值只有 md / txt）",
-                    c.getFormat(), format);
-        }
-        fields.put("format", format);
+        // format 写死不配：PDF 用 mix，其余（图片）用 md。
+        fields.put("format", pdf ? "mix" : "md");
         fields.put("resize", String.valueOf(c.isResize()));
         fields.put("use_cls", String.valueOf(c.isUseCls()));
         if (c.getAppId() != null && !c.getAppId().isBlank()) {
@@ -221,7 +215,7 @@ public class IpsClient {
     }
 
     /**
-     * format=md 的返回里带 {@code <img src="images/bbox_*.jpg" />} 这类占位标签：服务端并不返回
+     * format=md/mix 的返回里带 {@code <img src="images/bbox_*.jpg" />} 这类占位标签：服务端并不返回
      * 这些图，留着只会白占 token、还会让抽取模型以为有图。顺手压掉多余空行。
      */
     private static String cleanMarkdown(String raw) {

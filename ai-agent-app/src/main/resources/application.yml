@@ -156,7 +156,7 @@ agent:
     # 抽取阶段（分块调模型）的并发批数。
     concurrency: ${AGENT_PDF_CONCURRENCY:4}
     # 扫描版 PDF 逐页 OCR 的并发 worker 数；写入仍严格按页序，并发只发生在识别阶段，
-    # 页数 <= 2 时始终串行。format=md 单页慢约 4 倍，这里调高可以把 72 页那份的时间补回来。
+    # 页数 <= 2 时始终串行。OCR 单页慢（PDF 走 mix、图片走 md），这里调高可以把 72 页那份的时间补回来。
     ocr-parallelism: ${AGENT_PDF_OCR_PARALLELISM:2}
     # understand_document 分批理解 PDF 的并发批数；结果仍按批序归并，并发只影响耗时。
     understand-parallelism: ${AGENT_PDF_UNDERSTAND_PARALLELISM:2}
@@ -190,9 +190,6 @@ agent:
   #   POST /api/v3/bizlic/preprocess   营业执照识别——技能 bizlic-recognition，同上（只收图片）
   # base-url 留空 = OCR 不可用，抽取无法进行；CLI 侧 IPS_BASE_URL 由 scripts/docker-run.sh 同源注入。
   # OCR 一页一请求（服务端按页拼接会丢空白页、页码对不上）；PDF 的页级并发在 agent.pdfs.ocr-parallelism。
-  # format：txt=OpenOCR，单页快约 4 倍，但会丢字段标签（实测营业执照的「注册资本」标签在 txt
-  # 里整个消失，只剩裸数值，抽取只能靠猜）；md=走 vLLM，保留标签与版面，抽取召回明显更好。
-  # 默认 md：抽取质量优先，时间用 agent.pdfs.ocr-parallelism 补。
   ips:
     enabled: ${AGENT_IPS_ENABLED:true}
     base-url: ${AGENT_IPS_BASE_URL:http://127.0.0.1:8000}
@@ -207,9 +204,6 @@ agent:
     # 表单参数：resize=服务端缩放（快）；use_cls=方向检测（慢）。
     resize: ${AGENT_IPS_RESIZE:true}
     use-cls: ${AGENT_IPS_USE_CLS:false}
-    # OCR 输出格式：md=vLLM，保留字段标签与版面，抽取召回明显更好，但单页慢约 4 倍；txt=OpenOCR，快约 4 倍但会丢标签。
-    # 大页数文件预算不够时改 txt 可把 OCR 总时间砍到约 1/4，代价是抽取召回下降。
-    format: ${AGENT_IPS_FORMAT:md}
     # 渠道标识，便于服务端统计；留空=不下发。
     app-id: ${AGENT_IPS_APP_ID:ai-agent-java}
   tools:

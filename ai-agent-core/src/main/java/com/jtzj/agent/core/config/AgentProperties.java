@@ -1002,12 +1002,6 @@ public class AgentProperties {
         private boolean resize = true;
         /** OCR 表单字段 use_cls：服务端是否跑方向检测模型（true 更慢）。 */
         private boolean useCls = false;
-        /**
-         * OCR 表单字段 format：{@code txt}=OpenOCR（快约 4 倍，但会丢字段标签——实测营业执照的
-         * 「注册资本」标签在 txt 结果里整个消失，只剩裸数值）；{@code md}=走 vLLM（单页慢，
-         * 但保留标签与版面，抽取召回明显更好）。默认 md。
-         */
-        private String format = "md";
         /** OCR 表单字段 app_id：渠道标识，便于服务端统计；留空不下发。 */
         private String appId = "ai-agent-java";
 
@@ -1073,24 +1067,6 @@ public class AgentProperties {
 
         public void setUseCls(boolean useCls) {
             this.useCls = useCls;
-        }
-
-        public String getFormat() {
-            return format;
-        }
-
-        public void setFormat(String format) {
-            String v = format == null ? "" : format.trim().toLowerCase(java.util.Locale.ROOT);
-            this.format = v.isEmpty() ? "md" : v;
-        }
-
-        /**
-         * 实际下发给 OCR 的 format：只有 {@code md} / {@code txt} 两个有效值，其余（拼错、留空）
-         * 一律按 {@code md} 处理。留空不会套用 {@code ${AGENT_IPS_FORMAT:md}} 的默认值——Spring 对
-         * 「变量存在但为空」原样绑空串，不归一化就会向 OCR 端点发 {@code format=""}。
-         */
-        public String effectiveFormat() {
-            return "txt".equals(format) ? "txt" : "md";
         }
 
         public String getAppId() {
