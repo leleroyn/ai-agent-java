@@ -141,6 +141,13 @@ public class AgentProperties {
         /** 结构化输出策略，默认 AUTO（=旧行为）。 */
         private StructuredOutputMode structuredOutputMode = StructuredOutputMode.AUTO;
 
+        /**
+         * two_phase 第二阶段（自由文本→JSON）的输出预算（max_tokens）。
+         * 留空=沿用本 profile 的 max-tokens。代码侧不再有写死的 2048 上限，flash 与 pro
+         * 走同一套算法；真正的天花板是端点 n_ctx（schema + 结果文本 + 本值 必须小于它）。
+         */
+        private Integer structuredMaxTokens;
+
         /** "none" disables reasoning; see application.yml for the measured rationale. Blank = unset. */
         private String reasoningEffort = "none";
 
@@ -188,6 +195,14 @@ public class AgentProperties {
 
         public void setStructuredOutputMode(StructuredOutputMode structuredOutputMode) {
             this.structuredOutputMode = structuredOutputMode;
+        }
+
+        public Integer getStructuredMaxTokens() {
+            return structuredMaxTokens;
+        }
+
+        public void setStructuredMaxTokens(Integer structuredMaxTokens) {
+            this.structuredMaxTokens = structuredMaxTokens;
         }
 
         public boolean isNativeStructuredOutput() {

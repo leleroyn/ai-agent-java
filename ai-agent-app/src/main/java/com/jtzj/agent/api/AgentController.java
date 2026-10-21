@@ -1,5 +1,6 @@
 package com.jtzj.agent.api;
 
+import com.jtzj.agent.runtime.StructuredOutputConverter;
 import com.jtzj.agent.runtime.ToolkitFactory;
 import com.jtzj.agent.core.config.AgentProperties;
 import com.jtzj.agent.core.model.AgentTaskRequest;
@@ -143,21 +144,26 @@ public class AgentController {
     public ApiResponse<Map<String, Object>> health() {
         // 展示默认 profile 对应的实际模型名；配置缺失也不让 health 挂掉（退回 profile 名本身）。
         String defaultModel;
+        // two_phase 第二阶段的实际输出预算（随 profile 解析），改 env 时靠这个字段自检。
+        int structuredMaxTokens = 0;
         try {
-            defaultModel = props.resolveModel(null).getName();
+            AgentProperties.Model m = props.resolveModel(null);
+            defaultModel = m.getName();
+            structuredMaxTokens = StructuredOutputConverter.effectiveMaxTokens(m);
         } catch (Exception e) {
             defaultModel = props.getDefaultModel();
         }
-        return ApiResponse.ok(Map.of(
-                "active", service.activeCount(),
-                "queued", service.queuedCount(),
-                "queuedSync", service.queuedSyncCount(),
-                "syncActive", service.syncActiveCount(),
-                "syncConcurrency", service.syncWorkerCap(),
-                "asyncConcurrency", props.getExecution().getAsyncConcurrency(),
-                "maxQueuedTasks", props.getExecution().getMaxQueuedTasks(),
-                "workerId", service.workerId(),
-                "model", defaultModel,
-                "permissionMode", props.getRunner().getPermissionMode()));
+        return ApiResponse.ok(Map.ofEntries(
+                Map.entry("active", service.activeCount()),
+                Map.entry("queued", service.queuedCount()),
+                Map.entry("queuedSync", service.queuedSyncCount()),
+                Map.entry("syncActive", service.syncActiveCount()),
+                Map.entry("syncConcurrency", service.syncWorkerCap()),
+                Map.entry("asyncConcurrency", props.getExecution().getAsyncConcurrency()),
+                Map.entry("maxQueuedTasks", props.getExecution().getMaxQueuedTasks()),
+                Map.entry("workerId", service.workerId()),
+                Map.entry("model", defaultModel),
+                Map.entry("permissionMode", props.getRunner().getPermissionMode()),
+                Map.entry("structuredMaxTokens", structuredMaxTokens)));
     }
 }

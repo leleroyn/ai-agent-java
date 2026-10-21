@@ -51,6 +51,9 @@ public class AgentTaskRunner {
     private static final Pattern DOCUMENT_REFERENCE = Pattern.compile(
             "(?i)https?://\\S*\\.(?:pdf|jpe?g|png|webp|bmp|gif|txt|docx?|xlsx?|pptx?)(?![0-9A-Za-z])");
 
+    /** two_phase 第二阶段的地板超时：任务预算已耗尽时也给足这么多秒做转换（见 {@link #phaseTimeout}）。 */
+    private static final long MIN_PHASE_TIMEOUT_SECONDS = 60;
+
     private final AgentProperties props;
     private final ModelFactory modelFactory;
     private final ToolkitFactory toolkitFactory;
@@ -161,7 +164,7 @@ public class AgentTaskRunner {
         String text = safeText(reply);
         JsonNode result;
         if (mode == AgentProperties.StructuredOutputMode.TWO_PHASE && schema != null) {
-            result = structuredConverter.toStructured(text, schema, modelName);
+            result = structuredConverter.toStructured(text, schema, modelName, phaseTimeout(budget, startedAt));
         } else {
             result = extractStructured(reply, schema);
         }
@@ -171,6 +174,17 @@ public class AgentTaskRunner {
         }
 
         return new RunOutcome(result, text, reply.getUsage(), taskDir);
+    }
+
+    /**
+     * two_phase 第二阶段的墙钟预算：不给新预算，只吃任务剩下的时间，并兜底
+     * {@link #MIN_PHASE_TIMEOUT_SECONDS} 秒。历史实现固定 120 秒，实测 300 字段 schema 的转换
+     * 要 168 秒——固定的短超时会把本来能成的任务判成结构化失败。
+     */
+    private static Duration phaseTimeout(Duration budget, long startedAtNanos) {
+        long spentMs = (System.nanoTime() - startedAtNanos) / 1_000_000;
+        long leftMs = budget == null ? Long.MAX_VALUE : budget.toMillis() - spentMs;
+        return Duration.ofMillis(Math.max(leftMs, MIN_PHASE_TIMEOUT_SECONDS * 1000L));
     }
 
     /** One agent turn: schema rides along only when the first pass may stay free-form. */

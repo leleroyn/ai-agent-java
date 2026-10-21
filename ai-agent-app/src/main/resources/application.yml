@@ -37,8 +37,8 @@ agent:
   # 留空=回退视觉端点（旧行为）。
   text-model: ${AGENT_TEXT_MODEL:pro}
   models:
-    # flash：小快模型（llama.cpp :8007，minicpm）。实测 n_ctx=8192、total_slots=1（串行），
-    # 只适合短上下文、简单任务；复杂/多图/长文档任务应用 pro。
+    # flash：小快模型（llama.cpp :8007，minicpm）。实测 n_ctx=4096（2026-10-21 复测 /v1/models
+    # 报 4096）、total_slots=1（串行），只适合短上下文、简单任务；复杂/多图/长文档任务应用 pro。
     flash:
       base-url: ${AGENT_FLASH_BASE_URL:http://192.168.1.250:8007/v1}
       api-key: ${AGENT_FLASH_API_KEY:local}
@@ -48,6 +48,12 @@ agent:
       structured-output-mode: ${AGENT_FLASH_STRUCTURED_OUTPUT:two_phase}
       reasoning-effort: ${AGENT_FLASH_REASONING_EFFORT:none}
       max-tokens: ${AGENT_FLASH_MAX_TOKENS:2048}
+      # two_phase 第二阶段（自由文本→JSON）的输出预算；留空=沿用上一行 max-tokens。
+      # 大 schema 必须从这里放开：输出被截断时 strata 端点直接 502 structured_output_failed，
+      # llama.cpp 是 HTTP 200 带半截 JSON（finish_reason=length），两者最后都变成
+      # "produced no value matching outputSchema"，真因在日志 "structured convert HTTP ..."。
+      # 算术上限：schema token + 结果文本 token + 本值 <= 端点 n_ctx（实测 :8007=4096）。
+      structured-max-tokens: ${AGENT_FLASH_STRUCTURED_MAX_TOKENS:${AGENT_FLASH_MAX_TOKENS:2048}}
       temperature: ${AGENT_FLASH_TEMPERATURE:0.6}
       context-window-size: ${AGENT_FLASH_CONTEXT_WINDOW:8192}
       strata-checkpoint: ${AGENT_FLASH_STRATA_CHECKPOINT:}
@@ -64,6 +70,10 @@ agent:
       structured-output-mode: ${AGENT_PRO_STRUCTURED_OUTPUT:two_phase}
       reasoning-effort: ${AGENT_PRO_REASONING_EFFORT:none}
       max-tokens: ${AGENT_PRO_MAX_TOKENS:131072}
+      # 同上；pro 端点 n_ctx=204800（实测），大 schema 走这条。300 字段 schema 实测：
+      # 输入 43621 token + 输出 21020 token 正常，耗时 168 秒（所以第二阶段的 HTTP 超时
+      # 取任务剩余墙钟，不再固定 120 秒）。
+      structured-max-tokens: ${AGENT_PRO_STRUCTURED_MAX_TOKENS:${AGENT_PRO_MAX_TOKENS:131072}}
       temperature: ${AGENT_PRO_TEMPERATURE:1.0}
       context-window-size: ${AGENT_PRO_CONTEXT_WINDOW:131072}
       strata-checkpoint: ${AGENT_PRO_STRATA_CHECKPOINT:}

@@ -45,6 +45,12 @@ AgentTaskRunner → ReActAgent.call(msgs, schemaNode, ctx)
 
 结构化输出走两条路径之一（由 profile 的 `structured-output-mode` 决定：`auto|native|tool|two_phase|off`）：模型原生 `response_format`，或注入合成工具产出。
 
+**two_phase 第二阶段的预算（flash 与 pro 同一套算法，2026-10-21 实测）**
+- 输出预算＝`agent.models.<p>.structured-max-tokens`（留空＝沿用 `max-tokens`）。代码侧不再有写死的 2048 上限——输出被截断时 strata 端点直接回 **HTTP 502 `structured_output_failed`（"increase the output budget"）**，llama.cpp 回 **HTTP 200 带半截 JSON**（`finish_reason=length`），两种都在转换器里变成 null，任务侧只看到 `NO_RESULT: produced no value matching outputSchema`，真实原因在日志里是 `structured convert HTTP ...`。
+- 输入预算＝端点 n_ctx：`schema token + 结果文本 token + structured-max-tokens` 必须小于它。实测中文字段约 **55 token/字段** 输入、**20 token/字段** 输出；60 字段 schema（4437 token）在 :8007（n_ctx **4096**）直接 400 `exceed_context_size_error`。
+- 第二阶段的 HTTP 超时＝**任务剩余墙钟**（`AgentTaskRunner.phaseTimeout`，地板 60 秒），不再固定 120 秒：300 字段 schema 在 pro 上放开预算后实测 168 秒完成（输入 43621、输出 21020 token）。固定 120 秒会把这种能成的任务判成失败。
+- 提交层还有一道 `AGENT_LIMIT_SCHEMA`（默认 8192 字符）：大 schema 先要放开它，`outputSchema exceeds N characters` 是提交期参数错误。
+
 ---
 
 ## 3. 模块结构（多模块 · 重构后）
@@ -143,7 +149,7 @@ ai-agent-java/                         Maven 父工程 (packaging=pom, groupId c
 | DELETE | `/task/{taskId}` | 取消（仅未开始的可取消，否则 2002） |
 | GET | `/tools` | 列出**自定义工具**（当前 3 个，来自 SPI，不含框架内置） |
 | GET | `/skills` | 列出已安装技能名 |
-| GET | `/health` | 运行态：`model`/`asyncConcurrency`/`syncConcurrency`/`queued`/`queuedSync`/`active`/`syncActive`/`workerId`/`permissionMode`/`maxQueuedTasks` |
+| GET | `/health` | 运行态：`model`/`asyncConcurrency`/`syncConcurrency`/`queued`/`queuedSync`/`active`/`syncActive`/`workerId`/`permissionMode`/`maxQueuedTasks`/`structuredMaxTokens` |
 
 ### 提交体 `AgentTaskRequest`
 ```json
@@ -177,7 +183,7 @@ ai-agent-java/                         Maven 父工程 (packaging=pom, groupId c
 | 键组 | 关键项 |
 |---|---|
 | `agent.default-model` | 默认档位（`flash`） |
-| `agent.models.<flash\|pro>` | **两套完全独立**：`base-url` `api-key` `name` `max-tokens` `temperature` `context-window-size` `structured-output-mode` `reasoning-effort` `native-structured-output` `native-structured-output-with-tools` `strata-checkpoint` |
+| `agent.models.<flash\|pro>` | **两套完全独立**：`base-url` `api-key` `name` `max-tokens` `structured-max-tokens` `temperature` `context-window-size` `structured-output-mode` `reasoning-effort` `native-structured-output` `native-structured-output-with-tools` `strata-checkpoint` |
 | `agent.vision` | 独立视觉模型：`base-url` `api-key` `name` `temperature` `reasoning-effort` `max-tokens` `max-images` `max-image-bytes` `timeout-seconds` |
 | `agent.text-model` | 抽取/QA 的纯文本子调用用的 profile 名（`agent.models.*`），默认 `pro`；留空=回退视觉端点 |
 | `agent.runner` | `name` `sys-prompt` `max-iters` `permission-mode`(默认 `BYPASS`) |

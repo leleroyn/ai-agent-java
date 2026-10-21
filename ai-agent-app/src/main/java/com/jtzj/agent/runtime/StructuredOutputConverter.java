@@ -24,6 +24,13 @@ import org.springframework.stereotype.Component;
  * 能干净地按 schema 输出 JSON；一旦 tools 与 {@code response_format} 同时下发，模型会被语法约束
  * 强制直接作答、抑制工具调用。因此工具轮与结构化轮必须分开——本类只负责结构化轮。
  *
+ * <p>输出预算取 profile 的 {@code structured-max-tokens}（留空沿用 {@code max-tokens}），代码侧
+ * 不再有写死的 2048：输出被截断时 strata 端点回 HTTP 502 {@code structured_output_failed}，
+ * llama.cpp 回 HTTP 200 带半截 JSON（{@code finish_reason=length}），两种在这里都变成 null。
+ *
+ * <p>HTTP 超时由调用方按任务剩余墙钟传入（大 schema 的转换实测会跑几十秒到几分钟，固定 120 秒
+ * 会把能成的任务判成失败）。
+ *
  * <p>复用 JDK {@link HttpClient} + 已有的 Jackson 2 mapper，不引入新依赖。失败返回 {@code null}，
  * 由调用方（{@link AgentTaskRunner}）决定如何报错。
  */
@@ -34,8 +41,10 @@ public class StructuredOutputConverter {
 
     /** response_format.json_schema.name 须匹配 ^[a-zA-Z0-9_-]{1,64}$。 */
     private static final String SCHEMA_NAME = "structured_output";
-    /** 第二阶段只做格式转换，输出很小；上限从模型配置取，避免小 n_ctx 端点被撑爆。 */
+    /** structured-max-tokens 与 max-tokens 都没配时的兜底输出预算。 */
     private static final int MAX_OUTPUT_TOKENS = 2048;
+    /** 调用方没给预算时的兜底超时（即历史写死值）。 */
+    private static final Duration DEFAULT_PHASE_TIMEOUT = Duration.ofSeconds(120);
 
     private final AgentProperties props;
     private final ObjectMapper mapper;
@@ -55,20 +64,25 @@ public class StructuredOutputConverter {
     }
 
     /**
-     * @param text   自由文本结果（第一阶段产物）
-     * @param schema 调用方 JSON Schema
+     * @param text    自由文本结果（第一阶段产物）
+     * @param schema  调用方 JSON Schema
+     * @param timeout 本次调用的墙钟预算（任务剩余时间）；null/非正数→{@link #DEFAULT_PHASE_TIMEOUT}
      * @return 解析后的 JSON（object/array）；端点异常、空返回或非 JSON 时返回 {@code null}
      */
-    public JsonNode toStructured(String text, JsonNode schema, String modelName) {
+    public JsonNode toStructured(String text, JsonNode schema, String modelName, Duration timeout) {
         if (text == null || text.isBlank() || schema == null) {
             return null;
         }
         AgentProperties.Model m = props.resolveModel(modelName);
+        Duration httpTimeout = (timeout == null || timeout.isNegative() || timeout.isZero())
+                ? DEFAULT_PHASE_TIMEOUT : timeout;
+        log.debug("structured convert max_tokens={} http_timeout={}s text_chars={}",
+                effectiveMaxTokens(m), httpTimeout.toSeconds(), text.length());
         try {
             byte[] body = buildRequest(m, text, schema);
             HttpRequest req = HttpRequest
                     .newBuilder(URI.create(trimSlash(m.getBaseUrl()) + "/chat/completions"))
-                    .timeout(Duration.ofSeconds(120))
+                    .timeout(httpTimeout)
                     .header("Content-Type", "application/json")
                     .header("Authorization", "Bearer " + (m.getApiKey() == null ? "" : m.getApiKey()))
                     .POST(HttpRequest.BodyPublishers.ofByteArray(body))
@@ -80,20 +94,23 @@ public class StructuredOutputConverter {
             String respBody = new String(resp.body(), StandardCharsets.UTF_8);
 
             if (resp.statusCode() / 100 != 2) {
-                log.warn("structured convert HTTP {} in {}ms body={}", resp.statusCode(), ms, snippet(respBody));
+                log.warn("structured convert HTTP {} in {}ms max_tokens={} body={}",
+                        resp.statusCode(), ms, effectiveMaxTokens(m), snippet(respBody));
                 return null;
             }
             String content = extractContent(respBody);
             if (content == null || content.isBlank()) {
-                log.warn("structured convert empty content in {}ms", ms);
+                log.warn("structured convert empty content in {}ms max_tokens={}", ms, effectiveMaxTokens(m));
                 return null;
             }
             JsonNode node = mapper.readTree(stripCodeFence(content.trim()));
             if (node.isObject() || node.isArray()) {
-                log.info("structured convert ok in {}ms", ms);
+                log.info("structured convert ok in {}ms max_tokens={} content_len={}",
+                        ms, effectiveMaxTokens(m), content.length());
                 return node;
             }
-            log.warn("structured convert produced non-JSON content in {}ms", ms);
+            log.warn("structured convert produced non-JSON content in {}ms max_tokens={} content_len={}",
+                    ms, effectiveMaxTokens(m), content.length());
             return null;
         } catch (Exception e) {
             log.error("structured convert call failed", e);
@@ -101,11 +118,20 @@ public class StructuredOutputConverter {
         }
     }
 
+    /**
+     * 第二阶段的输出预算：优先 {@code structured-max-tokens}，留空沿用 profile 的 {@code max-tokens}，
+     * 两者都没有才兜底 {@link #MAX_OUTPUT_TOKENS}。flash 与 pro 同一算法，不再有 2048 写死上限。
+     */
+    public static int effectiveMaxTokens(AgentProperties.Model m) {
+        Integer configured = m.getStructuredMaxTokens() != null ? m.getStructuredMaxTokens() : m.getMaxTokens();
+        return configured != null ? configured : MAX_OUTPUT_TOKENS;
+    }
+
     private byte[] buildRequest(AgentProperties.Model m, String text, JsonNode schema) throws Exception {
         ObjectNode root = mapper.createObjectNode();
         root.put("model", m.getName());
         root.put("temperature", 0.0);
-        int maxTokens = (m.getMaxTokens() == null) ? MAX_OUTPUT_TOKENS : Math.min(MAX_OUTPUT_TOKENS, m.getMaxTokens());
+        int maxTokens = effectiveMaxTokens(m);
         root.put("max_tokens", maxTokens);
 
         ObjectNode fmt = root.putObject("response_format");

@@ -592,7 +592,8 @@ ocr_text, corp_image_base64}`。`ocr_text` 同样是 JSON 字符串，要再解�
     "maxQueuedTasks": 1000,
     "workerId": "JTZJ-PC-29336-be6b7e27",
     "model": "qwen",
-    "permissionMode": "BYPASS"
+    "permissionMode": "BYPASS",
+    "structuredMaxTokens": 131072
   }
 }
 ```
@@ -644,7 +645,13 @@ done
 | 项 | 默认 | 环境变量 |
 |---|---|---|
 | 指令最大长度 | 32768 字符 | `AGENT_LIMIT_INSTRUCTION` |
+
+> **大 outputSchema 的容量算术**（`structured-output-mode=two_phase`，flash 与 pro 同一算法）：
+> `schema token + 结果文本 token + structured-max-tokens` 必须小于端点 n_ctx（实测 flash :8007=**4096**、pro :8009=**204800**）。
+> 中文字段约 55 token/字段输入、20 token/字段输出。输出预算不足时 flash 拿到半截 JSON、pro 端点直接 502，
+> 两者都表现为任务失败 `NO_RESULT`，细节看日志 `structured convert HTTP ...`。第二阶段的超时取任务剩余墙钟（地板 60 秒）。
 | outputSchema 最大 | 8192 字符 | `AGENT_LIMIT_SCHEMA` |
+| two_phase 第二阶段输出预算 | flash 8192 / pro 131072 | `AGENT_FLASH_STRUCTURED_MAX_TOKENS` / `AGENT_PRO_STRUCTURED_MAX_TOKENS` |
 | metadata 最大 | 8192 字符 | `AGENT_LIMIT_METADATA` |
 | 默认超时 | 120 秒 | `AGENT_DEFAULT_TIMEOUT` |
 | 最大超时 | 900 秒 | `AGENT_MAX_TIMEOUT` |
