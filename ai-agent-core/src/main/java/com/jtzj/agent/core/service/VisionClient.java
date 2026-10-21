@@ -58,77 +58,11 @@ public class VisionClient {
     }
 
     /**
-     * @param imageUrls 一个或多个图片 URL（http/https）
-     * @param question  要视觉模型回答的理解性问题
-     * @return 视觉模型的文字结论；任何一步失败则返回 {@code "Error: ..."} 说明
-     */
-    public String understand(List<String> imageUrls, String question) {
-        AgentProperties.Vision v = props.getVision();
-        if (!v.isEnabled()) {
-            return "Error: 图片理解功能未启用（agent.vision.enabled=false）。";
-        }
-        if (imageUrls == null || imageUrls.isEmpty()) {
-            return "Error: 未提供任何图片 URL。";
-        }
-        if (question == null || question.isBlank()) {
-            return "Error: question 不能为空，请说明要对图片做什么。";
-        }
-        if (imageUrls.size() > v.getMaxImages()) {
-            return "Error: 一次最多理解 " + v.getMaxImages() + " 张图，当前传入 "
-                    + imageUrls.size() + " 张。请减少图片数量。";
-        }
-
-        List<ImageData> images = new ArrayList<>(imageUrls.size());
-        for (String url : imageUrls) {
-            ImageData data = downloadAsDataUrl(url, v);
-            if (data.error != null) {
-                return data.error;
-            }
-            images.add(data);
-        }
-
-        try {
-            byte[] body = buildRequest(v, question, images);
-            Duration timeout = Duration.ofSeconds(v.getTimeoutSeconds());
-            HttpRequest req = HttpRequest.newBuilder(URI.create(trimSlash(v.getBaseUrl()) + "/chat/completions"))
-                    .timeout(timeout)
-                    .header("Content-Type", "application/json")
-                    .header("Authorization", "Bearer " + (v.getApiKey() == null ? "" : v.getApiKey()))
-                    .POST(HttpRequest.BodyPublishers.ofByteArray(body))
-                    .build();
-
-            long start = System.nanoTime();
-            HttpResponse<byte[]> resp = http.send(req, HttpResponse.BodyHandlers.ofByteArray());
-            long ms = (System.nanoTime() - start) / 1_000_000;
-            String respBody = new String(resp.body(), StandardCharsets.UTF_8);
-
-            if (resp.statusCode() / 100 != 2) {
-                log.warn("vision call HTTP {} in {}ms body={}", resp.statusCode(), ms, snippet(respBody));
-                return "Error: 视觉模型返回 HTTP " + resp.statusCode() + "：" + snippet(respBody)
-                        + "（若提示 mmproj，说明该端点未加载多模态投影器，不是真 VL 模型）。";
-            }
-            String text = extractContent(respBody);
-            if (text == null || text.isBlank()) {
-                log.warn("vision returned empty content in {}ms body={}", ms, snippet(respBody));
-                return "Error: 视觉模型返回了空内容。可换一种问法或减少图片数量后重试。";
-            }
-            log.info("vision understood images={} in {}ms chars={}", images.size(), ms, text.length());
-            return text;
-        } catch (Exception e) {
-            log.error("vision call failed", e);
-            return "Error: 调用视觉模型失败：" + e.getClass().getSimpleName() + ": " + e.getMessage();
-        }
-    }
-
-    /**
      * 直接用已经准备好的图片 data URL 调用视觉模型（不再下载）。供 {@code understand_document}
      * 把 PDF 逐页栅格化后的图像喂给视觉模型用。返回文字结论，失败返回 {@code "Error: ..."}。
      */
     public String extractFromDataUrls(List<String> dataUrls, String prompt) {
         AgentProperties.Vision v = props.getVision();
-        if (!v.isEnabled()) {
-            return "Error: 视觉功能未启用（agent.vision.enabled=false）。";
-        }
         if (dataUrls == null || dataUrls.isEmpty()) {
             return "Error: 未提供任何图片。";
         }
@@ -180,9 +114,6 @@ public class VisionClient {
             return askTextOnly(prompt, m);
         }
         AgentProperties.Vision v = props.getVision();
-        if (!v.isEnabled()) {
-            return "Error: 视觉功能未启用（agent.vision.enabled=false）。";
-        }
         return postText("text:" + v.getName(), v.getBaseUrl(), v.getApiKey(), v.getName(),
                 v.getMaxTokens(), v.getTemperature(), v.getReasoningEffort(),
                 v.getTimeoutSeconds(), prompt);
@@ -224,38 +155,6 @@ public class VisionClient {
         } catch (Exception e) {
             log.error("{} call failed", label, e);
             return "Error: 调用模型失败：" + e.getClass().getSimpleName() + ": " + e.getMessage();
-        }
-    }
-
-    /** 下载单张图并转成 data URL；任何不合规情况通过 {@link ImageData#error} 返回可读错误。 */
-    private ImageData downloadAsDataUrl(String url, AgentProperties.Vision v) {
-        if (url == null || url.isBlank()) {
-            return ImageData.fail("Error: 图片 URL 为空。");
-        }
-        URI uri;
-        try {
-            uri = URI.create(url.trim());
-        } catch (Exception e) {
-            return ImageData.fail("Error: 非法的图片 URL '" + url + "'。");
-        }
-        String scheme = uri.getScheme();
-        if (scheme == null || !(scheme.equalsIgnoreCase("http") || scheme.equalsIgnoreCase("https"))) {
-            return ImageData.fail("Error: 图片 URL 必须是 http/https，收到 '" + url + "'。");
-        }
-        try {
-            HttpRequest req = HttpRequest.newBuilder(uri)
-                    .timeout(Duration.ofSeconds(v.getTimeoutSeconds()))
-                    .GET()
-                    .build();
-            HttpResponse<byte[]> resp = http.send(req, HttpResponse.BodyHandlers.ofByteArray());
-            if (resp.statusCode() / 100 != 2) {
-                return ImageData.fail("Error: 下载图片失败 HTTP " + resp.statusCode() + "：" + url);
-            }
-            return dataUrlFromBytes(resp.body(),
-                    resp.headers().firstValue("content-type").orElse(""), url, v);
-        } catch (Exception e) {
-            return ImageData.fail("Error: 下载图片异常：" + e.getClass().getSimpleName()
-                    + ": " + e.getMessage() + "（" + url + "）");
         }
     }
 

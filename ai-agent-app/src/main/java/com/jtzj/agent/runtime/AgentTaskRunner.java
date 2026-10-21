@@ -140,7 +140,7 @@ public class AgentTaskRunner {
                         + skillBlock + "\n任务指令：\n" + rewritten;
 
         AgentProperties.StructuredOutputMode mode = props.resolveModel(modelName).getStructuredOutputMode();
-        // TWO_PHASE / OFF：第一趟不带 schema 跑，让 understand_image 等工具能正常调用
+        // TWO_PHASE / OFF：第一趟不带 schema 跑，让 understand_document 等工具能正常调用
         // （带 schema 时 llama.cpp 会因 response_format 语法约束抑制工具调用）。TWO_PHASE 再补
         // 一次不带 tools 的文本→JSON 结构化调用；OFF 只兜底解析回复文本里的 JSON。
         boolean freeFormFirst = schema != null

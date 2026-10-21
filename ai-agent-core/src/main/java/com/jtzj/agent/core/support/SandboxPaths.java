@@ -6,7 +6,7 @@ import java.nio.file.Paths;
 /**
  * 把调用方给的「本地文件」参数解析到任务沙箱目录内，拒绝任何越权访问。
  *
- * <p>工具（{@code understand_image} / {@code understand_document}）除了 URL，也接受任务沙箱里的
+ * <p>工具（{@code understand_document}）除了 URL，也接受任务沙箱里的
  * 本地路径（例如模型用 shell 下载、或调用方预置到 {@code <working-dir>/<taskId>} 下的文件）。
  * 但绝不能让模型借此读取沙箱外的宿主文件，所以所有本地路径都必须在 {@code taskDir} 之内。
  *

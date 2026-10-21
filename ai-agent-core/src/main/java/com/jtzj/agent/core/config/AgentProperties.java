@@ -255,7 +255,7 @@ public class AgentProperties {
     }
 
     /**
-     * 独立的视觉（多模态）模型端点，供 {@code understand_image} 工具调用。
+     * 独立的视觉（多模态）模型端点，只给 {@code understand_document} 的看图通道用。
      *
      * <p><b>为什么不复用 {@link #model}</b>：主模型只处理文本，图片字节绝不进它的上下文——
      * 否则 ReAct 每一轮都带着图，token 膨胀、成本高，而且把图泄露给了主模型。图片只流向
@@ -265,7 +265,6 @@ public class AgentProperties {
      * 端点会直接返回 {@code 500 image input is not supported ... provide the mmproj}。
      */
     public static class Vision {
-        private boolean enabled = true;
         /** 必须是带 mmproj 的 OpenAI 兼容 VL 端点。 */
         private String baseUrl = "http://192.168.1.250:8008/v1";
         private String apiKey = "local";
@@ -282,14 +281,6 @@ public class AgentProperties {
         private String reasoningEffort = "none";
         /** 视觉模型最大输出 token 数；null=不下发（用后端默认）。 */
         private Integer maxTokens;
-
-        public boolean isEnabled() {
-            return enabled;
-        }
-
-        public void setEnabled(boolean enabled) {
-            this.enabled = enabled;
-        }
 
         public String getBaseUrl() {
             return baseUrl;
@@ -559,18 +550,16 @@ public class AgentProperties {
          */
         private boolean systemTime = true;
         /**
-         * 自定义工具：图片自由理解（{@code understand_image}）。默认开启。图片走独立的视觉模型
-         * （{@code agent.vision}），图片字节不进入主模型上下文。
-         */
-        private boolean imageUnderstand = true;
-        /**
-         * 自定义工具：图片字段抽取（{@code extract_image_fields}）。默认开启。结构化抽取指定字段。
-         */
-        private boolean imageExtract = true;
-        /**
          * 自定义工具：PDF 自由理解（{@code understand_document}）。默认开启。读某几页/小文档做自由问答。
          */
         private boolean documentUnderstand = true;
+        /**
+         * 看图开关：{@code understand_document} 的图片/PDF 视觉通道（图字节送到 {@code agent.vision}）
+         * 是否可用。默认 {@code true}。置 {@code false} 时本工具不再看图：图片/PDF 先 OCR 成文本
+         * （{@code .ocr/} 下的同名 txt，与抽取共用同一份缓存），再交给 {@code agent.text-model} 问答。
+         * {@code extract_document_fields} 本来就不看图（走 OCR 文本通道），不受本开关影响。
+         */
+        private boolean documentUnderstandVision = true;
         /**
          * 自定义工具：PDF 字段抽取（{@code extract_document_fields}）。默认开启。服务端遍历整篇、
          * 分批并发结构化抽取、确定性归并并回页码，召回不依赖主模型分页。
@@ -630,28 +619,20 @@ public class AgentProperties {
             this.systemTime = systemTime;
         }
 
-        public boolean isImageUnderstand() {
-            return imageUnderstand;
-        }
-
-        public void setImageUnderstand(boolean imageUnderstand) {
-            this.imageUnderstand = imageUnderstand;
-        }
-
-        public boolean isImageExtract() {
-            return imageExtract;
-        }
-
-        public void setImageExtract(boolean imageExtract) {
-            this.imageExtract = imageExtract;
-        }
-
         public boolean isDocumentUnderstand() {
             return documentUnderstand;
         }
 
         public void setDocumentUnderstand(boolean documentUnderstand) {
             this.documentUnderstand = documentUnderstand;
+        }
+
+        public boolean isDocumentUnderstandVision() {
+            return documentUnderstandVision;
+        }
+
+        public void setDocumentUnderstandVision(boolean documentUnderstandVision) {
+            this.documentUnderstandVision = documentUnderstandVision;
         }
 
         public boolean isDocumentExtract() {

@@ -495,6 +495,7 @@ UPDATE agent_task SET callback_status='pending'
 - 白名单只掐 shell，且只看每段的**可执行文件**、不看参数——`ips seal src/x.jpg > /tmp/o.txt` 的重定向目标不在管控内。
 - 白名单也管不到文件工具：`view_text_file`/`list_directory` 仍能读本任务目录内的文件（含 `.ocr/` 下的 OCR 全文），要一并断掉就设 `AGENT_TOOL_READ=false`。框架的权限规则只能按工具名 deny，做不到按路径。
 - OCR 文本通道**只用于字段抽取**。`understand_document` 对 PDF 始终走视觉，因为 OCR 文本会丢掉版面与图形信息。
+- **看图开关**：`agent.tools.document-understand-vision`（env `AGENT_TOOL_DOCUMENT_UNDERSTAND_VISION`，默认 `true`）。置 `false` 后 `understand_document` 不看图：图片/PDF 先 OCR 成文本（`.ocr/` 下同名 txt，与抽取共用同一份缓存），再交给 `agent.text-model` 问答，回答里逐来源标注「以下为 OCR 文本，看图功能未开启」。代价是丢掉版面与图形信息，「描述这张图」这类问题只能答图上印的字。`extract_document_fields` 本来就不看图，不受本开关影响。视觉端点没有开关（原 `agent.vision.enabled` 已删：端点不可达时工具直接返回 Error）。
 - `understand_document` **不暴露页范围**：PDF 按 `min(agent.pdfs.pages-per-call, agent.vision.max-images)` 页一批，服务端遍历全部页、每批问同一个问题，再用 `agent.text-model` 把各批归并成**一段**回答（批与批并发，`agent.pdfs.understand-parallelism` 默认 2，归并仍严格按批序）；图片来源超过 `max-images` 同样自动分批。TXT 超过一个文本块也一样分批归并。失败批次会在回答末尾列出，不会静默丢页——早先"超过单次上限就返回一段文案让模型自己用 `page_range` 分批"的做法已删掉，它把遍历全文的责任推给了模型，实测模型会为一个问题连开 5 次不同页范围。
 - **文档类指令必须真的读文件**：指令里点名了文档文件（`http(s)` URL 带 pdf/jpg/png/txt/… 后缀）、但整趟运行一个工具都没调时，服务端会带「必须先调工具」的硬约束重试一次；仍不调工具就 `status=failed` + `error.code=NO_RESULT`，绝不把模型凭记忆编出来的字段值当结果返回。要退回「只告警不拦截」，设 `AGENT_FORCE_DOCUMENT_TOOL=false`。
 

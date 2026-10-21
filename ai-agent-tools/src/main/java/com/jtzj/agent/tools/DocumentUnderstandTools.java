@@ -1,6 +1,7 @@
 package com.jtzj.agent.tools;
 
 import com.jtzj.agent.core.config.AgentProperties;
+import com.jtzj.agent.core.service.OcrTextService;
 import com.jtzj.agent.core.service.PdfService;
 import com.jtzj.agent.core.service.TextService;
 import com.jtzj.agent.core.service.VisionClient;
@@ -32,14 +33,17 @@ public class DocumentUnderstandTools {
     private final VisionClient visionClient;
     private final PdfService pdfService;
     private final TextService textService;
+    private final OcrTextService ocrTextService;
     private final AgentProperties props;
     private final Path taskDir;
 
     public DocumentUnderstandTools(VisionClient visionClient, PdfService pdfService,
-                                   TextService textService, AgentProperties props, Path taskDir) {
+                                   TextService textService, OcrTextService ocrTextService,
+                                   AgentProperties props, Path taskDir) {
         this.visionClient = visionClient;
         this.pdfService = pdfService;
         this.textService = textService;
+        this.ocrTextService = ocrTextService;
         this.props = props;
         this.taskDir = taskDir;
     }
@@ -115,6 +119,12 @@ public class DocumentUnderstandTools {
             }
         }
 
+        // 看图关闭（agent.tools.document-understand-vision=false）：图片/PDF 一律先 OCR 成文本，
+        // 再交给 agent.text-model 问答。抽取工具本来就不看图，不受这个开关影响。
+        if (!props.getTools().isDocumentUnderstandVision()) {
+            return understandAsText(images, pdfs, txts, question, ledger, key);
+        }
+
         StringBuilder result = new StringBuilder();
 
         if (!images.isEmpty()) {
@@ -138,7 +148,7 @@ public class DocumentUnderstandTools {
             result.append(QaMerge.merge(visionClient, parts, question));
         }
         for (String pdf : pdfs) {
-            String out = pdfService.understand(pdf, question, null, taskDir);
+            String out = pdfService.understand(pdf, question, taskDir);
             if (result.length() > 0) result.append('\n');
             result.append(out);
         }
@@ -149,6 +159,53 @@ public class DocumentUnderstandTools {
         }
 
         String answer = result.length() == 0 ? "Error: 无法识别文档类型。" : result.toString();
+        ledger.record(key, TOOL, answer);
+        return answer;
+    }
+
+    /**
+     * 看图关闭时的路径：所有来源统一换成文本（图片/PDF 走 OCR，产物是 {@code .ocr/} 下的同名 txt，
+     * 与 {@code extract_document_fields} 共用同一份缓存），再逐来源问答后拼接。
+     *
+     * <p>能力边界要说清：没有视觉模型，「描述这张图」「图里有什么图形」这类问题只能答
+     * 图上印的文字。转不成文本的来源单独列出，不静默丢。
+     */
+    private String understandAsText(List<String> images, List<String> pdfs, List<String> txts,
+                                    String question, CallLedger ledger, String key) {
+        List<String> refs = new ArrayList<>(images);
+        refs.addAll(pdfs);
+        StringBuilder result = new StringBuilder();
+        List<String> failures = new ArrayList<>();
+        for (String ref : refs) {
+            String txt = ocrTextService.toTextFile(ref, taskDir);
+            if (txt.startsWith("Error:")) {
+                failures.add(ref + " -> " + txt);
+                continue;
+            }
+            String out = textService.understand(txt, question, taskDir);
+            if (result.length() > 0) {
+                result.append('\n');
+            }
+            result.append("【").append(ref).append("：以下为 OCR 文本，看图功能未开启】").append(out);
+        }
+        for (String txt : txts) {
+            String out = textService.understand(txt, question, taskDir);
+            if (result.length() > 0) {
+                result.append('\n');
+            }
+            result.append(out);
+        }
+        if (!failures.isEmpty()) {
+            if (result.length() > 0) {
+                result.append('\n');
+            }
+            result.append("以下来源转文本失败：").append(String.join(" | ", failures));
+        }
+        if (result.length() == 0) {
+            return "Error: 看图功能未开启（agent.tools.document-understand-vision=false），"
+                    + "而这些来源 OCR 不出文本：" + String.join(" | ", failures);
+        }
+        String answer = result.toString();
         ledger.record(key, TOOL, answer);
         return answer;
     }

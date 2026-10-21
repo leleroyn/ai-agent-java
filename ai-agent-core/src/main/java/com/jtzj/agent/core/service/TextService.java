@@ -6,14 +6,11 @@ import com.jtzj.agent.core.support.QaMerge;
 import com.jtzj.agent.core.support.SandboxPaths;
 import com.jtzj.agent.core.support.SourceFiles;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.TreeSet;
 import java.util.concurrent.ExecutorService;
@@ -52,9 +49,6 @@ public class TextService {
      */
     public String extractFields(String txtSource, String fieldsRaw, Path taskDir) {
         AgentProperties.Pdfs cfg = props.getPdfs();
-        if (!props.getVision().isEnabled()) {
-            return "Error: 视觉功能未启用（agent.vision.enabled=false），无法处理文档。";
-        }
         List<String> fields = Extraction.parseFields(fieldsRaw);
         if (fields.isEmpty()) {
             return "Error: fields 为空，请指定要抽取的字段。";
@@ -129,9 +123,6 @@ public class TextService {
      */
     public String understand(String txtSource, String question, Path taskDir) {
         AgentProperties.Pdfs cfg = props.getPdfs();
-        if (!props.getVision().isEnabled()) {
-            return "Error: 视觉功能未启用（agent.vision.enabled=false），无法处理文档。";
-        }
         if (isHttpUrl(txtSource)) {
             return "Error: " + SourceFiles.URL_REJECTED;
         }

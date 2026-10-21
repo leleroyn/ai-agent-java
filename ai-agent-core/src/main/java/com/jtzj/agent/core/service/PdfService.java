@@ -5,10 +5,6 @@ import com.jtzj.agent.core.support.Extraction;
 import com.jtzj.agent.core.support.QaMerge;
 import com.jtzj.agent.core.support.SandboxPaths;
 import com.jtzj.agent.core.support.SourceFiles;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -16,11 +12,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Comparator;
-import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.TreeMap;
-import java.util.TreeSet;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -29,7 +21,6 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 /**
@@ -52,25 +43,19 @@ public class PdfService {
     private static final Pattern TRAIL_NUM = Pattern.compile("-(\\d+)\\.[A-Za-z0-9]+$");
 
     private final AgentProperties props;
-    private final ObjectMapper mapper;
     private final VisionClient visionClient;
 
-    public PdfService(AgentProperties props,
-                      @Qualifier("agentScopeObjectMapper") ObjectMapper mapper,
-                      VisionClient visionClient) {
+    public PdfService(AgentProperties props, VisionClient visionClient) {
         this.props = props;
-        this.mapper = mapper;
         this.visionClient = visionClient;
     }
 
     /**
-     * 自由问答（{@code understand_document}）。支持 PDF、TXT、图片。
+     * 自由问答（{@code understand_document} 的 PDF 视觉通道）：栅格化<b>全部页</b>、按批问同一个问题，
+     * 再用 agent.text-model 归并成一段回答。不暴露页范围。
      */
-    public String understand(String pdfSource, String question, String pageRange, Path taskDir) {
+    public String understand(String pdfSource, String question, Path taskDir) {
         AgentProperties.Pdfs cfg = props.getPdfs();
-        if (!props.getVision().isEnabled()) {
-            return "Error: 视觉功能未启用（agent.vision.enabled=false），无法理解 PDF。";
-        }
         if (isHttpUrl(pdfSource)) {
             return "Error: " + SourceFiles.URL_REJECTED;
         }
@@ -82,7 +67,7 @@ public class PdfService {
                         + "（指令里点名的文件应已就绪在 src/ 下）";
             }
             int total = pageCount(pdf);
-            List<int[]> segments = resolveRanges(pageRange, total);
+            List<int[]> segments = List.of(new int[]{1, total});
             int pages = pagesOf(segments).size();
             int cap = effectiveBatch(cfg);
             List<int[]> batches = batchSegments(segments, cap);
@@ -325,12 +310,6 @@ public class PdfService {
         return Integer.parseInt(m.group(1));
     }
 
-    /**
-     * 解析 page_range，支持多段：{@code 1-3}、{@code 5}、{@code 70-}、{@code -3}，段之间用
-     * 空格 / 逗号 / 分号 / 顿号分隔。模型会写 {@code "1-5 70-72"} 想要首尾两批；之前只按单个
-     * a-b 解析，{@code Integer.parseInt("5 70-72")} 直接抛 NumberFormatException，白烧一轮调用。
-     * 重叠或相邻的段会合并，避免同一页栅格化两次。
-     */
     /** 把页段按单次上限切成连续小段：栅格化按 -f/-l 取页，段内必须页码连续。 */
     private static List<int[]> batchSegments(List<int[]> segments, int cap) {
         List<int[]> out = new ArrayList<>();
@@ -340,62 +319,6 @@ public class PdfService {
             }
         }
         return out;
-    }
-
-    private static List<int[]> resolveRanges(String pageRange, int total) {
-        if (pageRange == null || pageRange.isBlank()) {
-            return List.of(new int[]{1, total});
-        }
-        String s = pageRange.trim()
-                .replace('－', '-').replace('—', '-').replace('~', '-');
-        List<int[]> out = new ArrayList<>();
-        for (String token : s.split("[\\s,;，、；]+")) {
-            String t = token.trim();
-            if (t.isEmpty()) {
-                continue;
-            }
-            int dash = t.indexOf('-');
-            int start;
-            int end;
-            if (dash < 0) {
-                start = parsePage(t, pageRange);
-                end = start;
-            } else {
-                String l = t.substring(0, dash).trim();
-                String r = t.substring(dash + 1).trim();
-                start = l.isEmpty() ? 1 : parsePage(l, pageRange);
-                end = r.isEmpty() ? total : parsePage(r, pageRange);
-            }
-            start = Math.max(1, start);
-            end = Math.min(end, total);
-            if (start <= end) {
-                out.add(new int[]{start, end});
-            }
-        }
-        if (out.isEmpty()) {
-            throw new IllegalArgumentException(
-                    "页范围无效：" + pageRange + "（总页数 " + total + "）");
-        }
-        out.sort(Comparator.comparingInt(a -> a[0]));
-        List<int[]> merged = new ArrayList<>();
-        for (int[] seg : out) {
-            int[] last = merged.isEmpty() ? null : merged.get(merged.size() - 1);
-            if (last != null && seg[0] <= last[1] + 1) {
-                last[1] = Math.max(last[1], seg[1]);
-            } else {
-                merged.add(seg);
-            }
-        }
-        return merged;
-    }
-
-    private static int parsePage(String token, String pageRange) {
-        try {
-            return Integer.parseInt(token);
-        } catch (NumberFormatException e) {
-            throw new IllegalArgumentException("页范围无效：" + pageRange
-                    + "。单个范围写成 \"a-b\"、\"a\"、\"a-\"；多段用空格或逗号分隔，例如 \"1-3 70-72\"。");
-        }
     }
 
     /** 段集合展开成页号列表。 */

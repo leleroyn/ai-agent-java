@@ -78,12 +78,13 @@ agent:
       context-window-size: ${AGENT_PRO_CONTEXT_WINDOW:131072}
       strata-checkpoint: ${AGENT_PRO_STRATA_CHECKPOINT:}
 
-  # 独立的视觉（多模态）模型，供 understand_document / extract_document_fields 工具调用。
+  # 独立的视觉（多模态）模型，只给 understand_document 的看图通道用
+  # （看图关掉时走 OCR 文本，压根不碰这个端点）。没有「开关视觉端点」的配置项：
+  # 端点不可达时 understand_document 直接返回 Error。
   # 图片字节只到这里，绝不进主模型的上下文——主模型保持纯文本。
   # 该端点必须是带 mmproj 的真 VL 模型；不带 mmproj 的会直接返回
   # "500 image input is not supported ... provide the mmproj"。
   vision:
-    enabled: ${AGENT_VISION_ENABLED:true}
     base-url: ${AGENT_VISION_BASE_URL:http://192.168.1.250:8008/v1}
     api-key: ${AGENT_VISION_API_KEY:local}
     name: ${AGENT_VISION_MODEL_NAME:qwenvl}
@@ -231,6 +232,10 @@ agent:
     document-understand: ${AGENT_TOOL_DOCUMENT_UNDERSTAND:true}
     # 自定义工具：extract_document_fields（图片/PDF/TXT 字段抽取）。
     document-extract: ${AGENT_TOOL_DOCUMENT_EXTRACT:true}
+    # 看图开关：understand_document 的图片/PDF 视觉通道（图字节送到 agent.vision 的 VL 端点）。
+    # false = 不看图：图片/PDF 先 OCR 成文本（.ocr/ 下同名 txt，与抽取共用同一份缓存），再交给
+    # agent.text-model 问答。extract_document_fields 本来就不看图（OCR 文本通道），不受本开关影响。
+    document-understand-vision: ${AGENT_TOOL_DOCUMENT_UNDERSTAND_VISION:true}
 
     # Sandbox root. Each task gets its own private subdirectory <working-dir>/<taskId>,
     # which is what the file tools are actually confined to.
