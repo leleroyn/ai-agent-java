@@ -109,8 +109,9 @@ public class CallbackNotifier {
     }
 
     private void deliver(TaskRecord task) {
-        // Re-read from DB to ensure payload is identical to GET /task/{id} response data.
-        TaskRecord fresh = store.find(task.getTaskId()).orElse(task);
+        // Re-read from DB to ensure payload is identical to GET /task/{id} response data
+        // (tool-call chain included: it lives in the agent_tool_call child table).
+        TaskRecord fresh = store.findWithToolCalls(task.getTaskId()).orElse(task);
         String payload;
         try {
             TaskStatusView view = TaskStatusView.of(fresh, jackson2);

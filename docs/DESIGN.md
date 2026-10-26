@@ -66,6 +66,7 @@ ai-agent-java/                         Maven 父工程 (packaging=pom, groupId c
 │   └── src/main/java/com/jtzj/agent/core/
 │       ├── config/    AgentProperties        @ConfigurationProperties("agent")
 │       ├── model/     AgentTaskRequest · TaskRecord · TaskStatus · TaskStatusView · TaskError · TaskUsage
+│       │              ToolCallRecord        一次工具调用 = agent_tool_call 的一行（见 §14）
 │       ├── service/   VisionClient           独立视觉模型客户端（图片/扫描页字节只发到 agent.vision）
 │       │              IpsClient             独立 OCR 服务客户端（multipart 上传页图，只回文本）
 │       │              OcrTextService         图片/PDF → 同名 .txt（PDF 逐页按页序追加；txt 名带内容哈希）
@@ -94,7 +95,7 @@ ai-agent-java/                         Maven 父工程 (packaging=pom, groupId c
 │   │   ├── service/    AgentTaskService · TaskPoller
 │   │   ├── store/      MysqlTaskStore · TaskStore
 │   │   └── config/     Jackson2Config（agentScopeObjectMapper，Jackson 2）
-│   └── src/main/resources/  application.yml · db/{schema,migration-001..006}.sql
+│   └── src/main/resources/  application.yml · db/{schema,migration-001..007}.sql
 │
 ├── agent-skills/                    运行期技能挂载点（部署产物，默认只 README）
 ├── docs/  API.md · DEPLOY.md · DESIGN.md · examples/
@@ -170,8 +171,7 @@ ai-agent-java/                         Maven 父工程 (packaging=pom, groupId c
 { "taskId":"…", "status":"completed",
   "resultText":"…",                         // 文本或按 outputSchema 产出的 JSON 字符串
   "usage": { "inputTokens":0, "outputTokens":0 },
-  "tools": { "count":1, "truncated":false, "tools":["get_system_time"],
-             "calls":[{"seq":1,"tool":"get_system_time","atMs":900,"ms":40,"state":"success"}] },
+  "tools": [ {"seq":1,"tool":"get_system_time","atMs":900,"ms":40,"state":"success"} ],
   "createdAt":"…Z", "startedAt":"…Z", "completedAt":"…Z", "durationMs":1234 }
 ```
 失败时附 `error`: `{ "code":"AGENT_TIMEOUT|AGENT_EXECUTION_FAILED|NO_RESULT|AGENT_INTERRUPTED|INVALID_REQUEST|CONCURRENCY_LIMITED", "message":"…", "retryable":true|false }`。
@@ -194,7 +194,7 @@ ai-agent-java/                         Maven 父工程 (packaging=pom, groupId c
 | `agent.pdfs` | `enabled` `pages-per-call` `concurrency` `ocr-parallelism` `understand-parallelism` `max-pages` `max-image-dimension` `jpeg-quality` `timeout-seconds` `max-download-bytes` `text-chunk-size` `text-chunk-overlap` `ssrf-allowlist` |
 | `agent.ips` | 综合服务平台，Java 侧只剩 OCR：`enabled` `base-url` `ocr-timeout-seconds` `rasterize-dpi` `max-image-dimension` `jpeg-quality` `resize` `use-cls` `app-id`（OCR 的 format 写死：PDF 用 mix、图片用 md，不再配置）。印章/发票走镜像内置 `ips` CLI，其超时是 OS 变量 `IPS_TIMEOUT_SECONDS`（不在 Spring 配置里） |
 | `agent.skills` | `enabled` `directory` `classpath-location` `code-execution-enabled` `max-requested` `max-inline-chars` |
-| `agent.trace` | `enabled`(true) `max-entries`(80) `max-args-chars`(400)：工具调用链的采集与截断，落 `agent_task.tool_trace`（见 §14） |
+| `agent.trace` | `enabled`(true) `max-entries`(200) `max-args-chars`(400)：工具调用链的采集与截断，一条调用一行落 `agent_tool_call` 子表（见 §14） |
 
 数据源：`serverTimezone=Asia/Shanghai`（见 §5 时间说明）。
 
@@ -434,7 +434,7 @@ agent 用 `execute_shell_command` 直接调。目前只有 `ips`（Rust/musl sta
 
 ---
 
-## 14. 工具调用链（`tool_trace`）
+## 14. 工具调用链（`agent_tool_call`）
 
 **动机**：任务跑完过去只剩 `resultText` 和 token 数。排查「这条营业执照为什么漏字段」时看不出模型这一趟
 到底做了什么——是一个工具都没调（凭记忆编值）、OCR 调了两次第二次失败、还是走了 shell 里的 `ips seal`。
@@ -447,17 +447,28 @@ agent 用 `execute_shell_command` 直接调。目前只有 `ips`（Rust/musl sta
 一趟任务一个实例，线程安全（工具是 concurrencySafe 的）；「文档任务强制调工具」的重试那一趟继续往后接，
 一条链完整反映整条任务跑过什么。同一个 `isEmpty()` 还喂给 §11 的接地判定（指令点名文件却一个工具都没调）。
 
-**落库与出口**：`agent_task.tool_trace`（MEDIUMTEXT，`migration-006`）。完成与失败都写：失败时链尾那条通常
-就是断点，所以 `AgentException` 带着链穿回 `TaskPoller`。出口是 `GET /task/{id}` 的 `tools` 字段（API.md §4.1），
-回调 payload 与查询响应同源，也带。
+**落库**：独立子表 `agent_tool_call`（`migration-007`），**一条调用一行**——任务 : 调用 = 一对多，唯一键
+`(task_id, attempt, seq)`，写入用 `INSERT IGNORE`，所以终态写入重试时不会写出重复行。
+为什么不塞进 `agent_task` 的一列 JSON：读要解析、「这周哪些任务调过 ips seal」只能 LIKE、终态那条 UPDATE
+还要顺带搬一整坨文本。一行一次调用之后，按工具查、按天统计、只看某一次重试都是普通 SQL。
+
+`attempt` = 第几次认领这趟运行：租约到期重跑的任务每一趟各留一条链，`findToolCalls` 只回最近那一次。
+
+**写它在终态之后，且整段包 try/catch**（`TaskPoller.saveToolCalls`）：观测数据不值得让一条跑完的任务变成
+失败，子表缺失（老库没执行 migration-007）时同样只丢观测不丢任务；读侧同理，`findToolCalls` 把查不到当空集合。
+完成与失败都写——失败时链尾那条通常就是断点，所以 `AgentException` 带着链穿回 `TaskPoller`。
+
+**出口**：`GET /task/{id}` 的 `tools` 是调用数组（API.md §4.1），回调 payload 同源。子表由
+`TaskStore.findWithToolCalls` 带出，只有任务详情与回调用它；worker 认领与 `sync=true` 的轮询走 `find()`，
+那里每几十毫秒读一次，不该每次都多打一条子表 SQL。
 
 **记什么**：只记调用事实（工具名、参数、`atMs`/`ms`、状态），**不记返回值**——OCR 全文几万字符不进库，
 结果本身在 `result_json`/`result_text`。**参数与条数都在服务端截断**（`agent.trace.max-args-chars`=400、
-`max-entries`=80），`count` 记真实次数并带 `truncated` 标记，所以截断后仍看得出这条任务一共调了多少次。
+`max-entries`=200）：超出上限的调用不写行，真实次数进日志（完成/失败那行的 `toolCalls=`）。
 
 **与调用台账分工**：`CallLedger`（`.ocr/calls.json`，见「工具幂等」一节）管**去重**——同参数不重跑，只存在
-任务目录里，目录删掉就没了、跨任务不复用；`ToolTrace` 管**观测**——按顺序记，落库、进响应。
+任务目录里，目录删掉就没了、跨任务不复用；`ToolTrace` 管**观测**——按顺序记，落子表、进响应。
 
-**关掉**：`agent.trace.enabled=false`（`AGENT_TRACE_TOOLS=false`）时链不落库、不进响应，也不写该列；
-调用次数与工具名仍在记，所以 `force-document-tool` 的接地判定不受开关影响。
-老库还没执行 migration-006 时必须先关掉：写终态的 SQL 已包含 `tool_trace`，缺列会让结果写不进去。
+**关掉**：`agent.trace.enabled=false`（`AGENT_TRACE_TOOLS=false`）时子表里没有该任务的行、响应里也没有
+`tools` 键；调用次数与工具名仍在记，所以 `force-document-tool` 的接地判定（§11）不受开关影响。
+老库没执行 migration-007 也**不用**关采集：链是独立的一次插入，不掺进终态那条 SQL。

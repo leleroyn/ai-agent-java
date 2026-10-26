@@ -72,9 +72,9 @@ accepted ────────────────► running ───�
 
 认领顺序不是纯 FIFO：`options.sync=true` 的任务排在普通任务前面（`sync_requested DESC, created_at ASC`），因为调用方正阻塞在 HTTP 里等结果，异步批量任务多等一轮无感。同一优先级内仍按提交先后。
 
-老库升级需手动执行 `db/migration-005-sync-priority.sql`（新增 `sync_requested` 列）与 `db/migration-006-tool-trace.sql`（新增 `tool_trace` 列），新装由 `schema.sql` 直接带上。
+老库升级需手动执行 `db/migration-005-sync-priority.sql`（新增 `sync_requested` 列）与 `db/migration-007-tool-call-table.sql`（新增 `agent_tool_call` 表：工具调用链），新装由 `schema.sql` 直接带上。
 
-> `tool_trace` 那一列是**写终态的 SQL 的一部分**：老库缺列时任务能跑完但结果写不进去。所以老库要么先执行 migration-006，要么先设 `AGENT_TRACE_TOOLS=false` 关掉工具链采集。
+> 工具调用链写在**独立的表**里（任务 : 调用 = 一对多，一条调用一行），不掺进任务行的终态写入：老库没执行 migration-007 时任务照跑、结果照写，只是响应里没有 `tools`。
 
 ---
 
@@ -362,7 +362,7 @@ UPDATE agent_task SET callback_status='pending'
 | `resultText` | 最终文本；有 schema 时是 JSON 字符串，无 schema 时是自由文本 |
 | `error` | 仅 `status=failed` 时有值：`{code, message, retryable}` |
 | `usage` | token 用量；未跑完时可能不存在 |
-| `tools` | 这一趟实际调用的工具链，见 §4.1；一条都没调 / 未采集时无此键 |
+| `tools` | 这一趟调用的工具链**数组**，一条调用一个元素，见 §4.1；一条都没调 / 未采集时无此键 |
 | `createdAt`/`startedAt`/`completedAt` | UTC ISO-8601，入库精度毫秒 |
 | `durationMs` | 纯执行耗时，不含排队 |
 
@@ -391,37 +391,32 @@ UPDATE agent_task SET callback_status='pending'
 
 ### 4.1 `tools`：工具调用链
 
-任务详情里能看到模型这一趟**按顺序**调了哪些工具、参数是什么、每次多久、成功还是失败：
+任务详情里能看到模型这一趟**按顺序**调了哪些工具、参数是什么、每次多久、成功还是失败。它是数组，
+**一次调用一个元素**（库里的 `agent_tool_call` 就是一行一次调用，任务 : 调用 = 一对多）：
 
 ```json
-"tools": {
-  "count": 3,
-  "truncated": false,
-  "tools": ["load_skill_through_path", "execute_shell_command", "understand_document"],
-  "calls": [
-    { "seq": 1, "tool": "load_skill_through_path", "args": "{\"skill\":\"seal-recognition\"}", "atMs": 1420, "ms": 310, "state": "success" },
-    { "seq": 2, "tool": "execute_shell_command", "args": "{\"command\":\"ips seal src/stamp.png\"}", "atMs": 4980, "ms": 6120, "state": "success" },
-    { "seq": 3, "tool": "understand_document", "args": "{\"sources\":\"src/stamp.png\"}", "atMs": 12400, "ms": 830, "state": "error" }
-  ]
-}
+"tools": [
+  { "seq": 1, "tool": "load_skill_through_path", "args": "{\"skill\":\"seal-recognition\"}", "atMs": 1420, "ms": 310, "state": "success" },
+  { "seq": 2, "tool": "execute_shell_command", "args": "{\"command\":\"ips seal src/stamp.png\"}", "atMs": 4980, "ms": 6120, "state": "success" },
+  { "seq": 3, "tool": "understand_document", "args": "{\"sources\":\"src/stamp.png\"}", "atMs": 12400, "ms": 830, "state": "error" }
+]
 ```
 
 | 字段 | 说明 |
 |---|---|
-| `count` | 真实调用次数，含因超出 `agent.trace.max-entries` 没进 `calls` 的 |
-| `truncated` | `calls` 是否被截断 |
-| `tools` | 去重后的工具名，按首次调用顺序 |
-| `calls[].seq` | 调用序号，从 1 开始 |
-| `calls[].tool` | 工具名 |
-| `calls[].args` | 参数，JSON **字符串**（按 `agent.trace.max-args-chars` 截断） |
-| `calls[].atMs` | 距任务开始的毫秒 |
-| `calls[].ms` | 本次调用耗时（毫秒） |
-| `calls[].state` | `success` / `error` / `denied` / `interrupted`；任务被取消时未收尾的调用记 `interrupted` |
+| `seq` | 调用序号，从 1 开始 |
+| `tool` | 工具名 |
+| `args` | 参数，JSON **字符串**（按 `agent.trace.max-args-chars` 截断）；关闭采集时该键不出现 |
+| `atMs` | 距任务开始的毫秒 |
+| `ms` | 本次调用耗时（毫秒）；调用没等到结果就被中断时该键不出现 |
+| `state` | `success` / `error` / `denied` / `interrupted`；任务被取消时未收尾的调用记 `interrupted` |
 
 - 记的是**调用事实**，不含返回值：结果本身在 `result` / `resultText`，OCR 中间产物在任务目录里（`delete-workspace-on-finish=false` 时保留）。
 - 一条工具都没调时**没有** `tools` 键（不是空数组）。
-- 采集开关与截断上限见 §10；老库缺 `tool_trace` 列时先关采集，见 §2。
-- 工具名里的 `execute_shell_command` 就是模型在跑镜像内置的 `ips` CLI（§6.2），链里的 `args.command` 是它执行的完整命令。
+- 任务重试过（租约到期被重新领取）时返回的是**最近一次运行**的链；之前每次运行的链按 `attempt` 留在表里，查表看得到。
+- 超出 `agent.trace.max-entries` 的调用不入库，数组长度最多到它；真实调用次数在服务端日志的 `toolCalls=`。
+- 采集开关与截断上限见 §10；表由 `db/migration-007-tool-call-table.sql` 建（见 §2）。老库没建表时任务照跑、结果照写，只是没有 `tools`。
+- 工具名里的 `execute_shell_command` 就是模型在跑镜像内置的 `ips` CLI（§6.2），`args.command` 是它执行的完整命令。
 
 ---
 
@@ -701,7 +696,7 @@ done
 | 注入技能正文总量上限 | 12000 字符 | `AGENT_SKILLS_MAX_INLINE_CHARS` |
 | 技能开关 / 目录 | true / `./agent-skills` | `AGENT_SKILLS_ENABLED` / `AGENT_SKILLS_DIR` |
 | 工具调用链采集开关 | true | `AGENT_TRACE_TOOLS` |
-| 工具链最多记多少次（超出只计入 `count`） | 80 | `AGENT_TRACE_MAX_ENTRIES` |
+| 一趟任务最多写多少行调用链（超出的不入库） | 200 | `AGENT_TRACE_MAX_ENTRIES` |
 | 工具链单次参数截断 | 400 字符 | `AGENT_TRACE_MAX_ARGS_CHARS` |
 
 ---

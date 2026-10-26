@@ -1,6 +1,7 @@
 package com.jtzj.agent.core.model;
 
 import java.time.Instant;
+import java.util.List;
 
 /**
  * Persisted task row. Mutable because a task is updated in place across its lifecycle.
@@ -40,8 +41,11 @@ public class TaskRecord {
     private Long outputTokens;
     private Long totalTokens;
     private Long durationMs;
-    /** 工具调用链 JSON：{count,truncated,tools[],calls[]}；null = 没记（开关关掉或老任务）。 */
-    private String toolTrace;
+    /**
+     * 工具调用链（{@code agent_tool_call} 的子行，最近一次 attempt 的那一套）。
+     * 只有读路径会填（TaskStore.findWithToolCalls）；null = 没查子表 / 采集关闭 / 老任务。
+     */
+    private List<ToolCallRecord> toolCalls;
 
     private Instant createdAt;
     private Instant startedAt;
@@ -224,12 +228,12 @@ public class TaskRecord {
         this.durationMs = durationMs;
     }
 
-    public String getToolTrace() {
-        return toolTrace;
+    public List<ToolCallRecord> getToolCalls() {
+        return toolCalls;
     }
 
-    public void setToolTrace(String toolTrace) {
-        this.toolTrace = toolTrace;
+    public void setToolCalls(List<ToolCallRecord> toolCalls) {
+        this.toolCalls = toolCalls;
     }
 
     public Instant getCreatedAt() {

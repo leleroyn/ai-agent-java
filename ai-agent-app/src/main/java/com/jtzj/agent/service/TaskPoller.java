@@ -4,6 +4,7 @@ import com.jtzj.agent.core.error.AgentException;
 import com.jtzj.agent.runtime.AgentTaskRunner;
 import com.jtzj.agent.core.error.ErrorCodes;
 import com.jtzj.agent.core.config.AgentProperties;
+import com.jtzj.agent.core.model.ToolCallRecord;
 import com.jtzj.agent.core.model.TaskRecord;
 import com.jtzj.agent.core.model.TaskStatus;
 import com.jtzj.agent.store.TaskStore;
@@ -285,6 +286,27 @@ public class TaskPoller implements DisposableBean {
         return Math.max(0, props.getExecution().getSyncConcurrency());
     }
 
+    /**
+     * 调用链写进 agent_tool_call，一条调用一行（一对多的「多」）。
+     *
+     * <p>整段吞异常：观测数据不值得让一条已经跑完的任务变成失败，也不该因为子表还没建
+     * （生产尚未执行 migration-007）就挡住终态写入。写失败只丢观测，留一行 debug。
+     */
+    private void saveToolCalls(String taskId, TaskRecord task, List<ToolCallRecord> calls) {
+        if (calls == null || calls.isEmpty()) {
+            return;
+        }
+        try {
+            store.saveToolCalls(taskId, task.getAttempt() == null ? 0 : task.getAttempt(), calls);
+        } catch (Exception e) {
+            log.debug("tool calls not saved for {}: {}", taskId, e.toString());
+        }
+    }
+
+    private static int toolCallCount(List<ToolCallRecord> calls) {
+        return calls == null ? 0 : calls.size();
+    }
+
     private void execute(TaskRecord task) {
         String taskId = task.getTaskId();
         MDC.put("taskId", taskId);
@@ -305,7 +327,7 @@ public class TaskPoller implements DisposableBean {
             } catch (Exception e) {
                 store.markFailed(taskId, workerId, ErrorCodes.INVALID_REQUEST,
                         "stored outputSchema could not be parsed: " + e.getMessage(),
-                        false, null, null, Instant.now(), 0L);
+                        false, null, Instant.now(), 0L);
                 return;
             }
 
@@ -327,16 +349,14 @@ public class TaskPoller implements DisposableBean {
             boolean written = store.markCompleted(taskId, workerId,
                     outcome.result() == null ? null : outcome.result().toString(),
                     outcome.text(),
-                    outcome.toolTrace(),
                     inputTokens, outputTokens, totalTokens,
                     Instant.now(), durationMs);
             if (written) {
-                log.info("task {} completed in {}ms tokens={}/{} hasResult={}",
-                        taskId, durationMs, inputTokens, outputTokens, outcome.result() != null);
-                // 调用链已落库（tool_trace）：排查看任务详情；日志再留一条给 docker logs。
-                log.debug("task {} tool chain: {}", taskId, outcome.toolTrace());
-                // 调用链已落库（tool_trace），排查时直接看任务详情；日志留一条给 docker logs。
-                log.debug("task {} tool chain: {}", taskId, outcome.toolTrace());
+                // 调用链一条一行落 agent_tool_call：排查看任务详情，日志只留次数给 docker logs。
+                saveToolCalls(taskId, task, outcome.toolCalls());
+                log.info("task {} completed in {}ms tokens={}/{} hasResult={} toolCalls={}",
+                        taskId, durationMs, inputTokens, outputTokens, outcome.result() != null,
+                        toolCallCount(outcome.toolCalls()));
                 task.setStatus(TaskStatus.COMPLETED);
                 task.setResultText(outcome.text());
                 task.setResultJson(outcome.result() == null ? null : outcome.result().toString());
@@ -349,13 +369,12 @@ public class TaskPoller implements DisposableBean {
             }
         } catch (AgentException e) {
             long durationMs = System.currentTimeMillis() - startMillis;
-            log.warn("task {} failed code={} retryable={} message={}",
-                    taskId, e.getCode(), e.isRetryable(), e.getMessage());
-            log.debug("task {} tool chain: {}", taskId, e.getToolTrace());
             // 链跟着失败落库：最后那一条调用通常就是断点。
+            saveToolCalls(taskId, task, e.getToolCalls());
+            log.warn("task {} failed code={} retryable={} message={} toolCalls={}",
+                    taskId, e.getCode(), e.isRetryable(), e.getMessage(), toolCallCount(e.getToolCalls()));
             store.markFailed(taskId, workerId, e.getCode(), e.getMessage(),
-                    e.isRetryable(), null, e.getToolTrace(), Instant.now(), durationMs);
-            log.debug("task {} tool chain: {}", taskId, e.getToolTrace());
+                    e.isRetryable(), null, Instant.now(), durationMs);
             task.setStatus(TaskStatus.FAILED);
             task.setErrorCode(e.getCode());
             task.setErrorMessage(e.getMessage());
@@ -366,7 +385,7 @@ public class TaskPoller implements DisposableBean {
             log.error("task {} failed unexpectedly", taskId, e);
             store.markFailed(taskId, workerId, ErrorCodes.AGENT_EXECUTION_FAILED,
                     e.getClass().getSimpleName() + ": " + e.getMessage(),
-                    false, null, null, Instant.now(), durationMs);
+                    false, null, Instant.now(), durationMs);
             task.setStatus(TaskStatus.FAILED);
             task.setErrorCode(ErrorCodes.AGENT_EXECUTION_FAILED);
             task.setErrorMessage(e.getClass().getSimpleName() + ": " + e.getMessage());

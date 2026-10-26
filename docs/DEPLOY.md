@@ -190,7 +190,7 @@ docker run --rm --entrypoint sh ai-agent-java:1.0.0 -c 'du -sh /workspace'
 ## 7. 上线前检查清单
 
 - [x] `pom.xml` 版本去掉 `-SNAPSHOT`（现为 `1.0.0`）
-- [ ] 老库先执行 `db/migration-006-tool-trace.sql`（给 `agent_task` 加 `tool_trace` 列）：写终态的 SQL 已包含该列，缺列的任务结果写不进去；实在不能改库时设 `AGENT_TRACE_TOOLS=false` 关掉采集
+- [ ] 老库执行 `db/migration-007-tool-call-table.sql`（建 `agent_tool_call` 表：工具调用链一条调用一行）。不执行也不影响任务——链写失败只丢观测；跑过 006 的库顺带删掉那个 JSON 列
 - [ ] `.env` 从 `.env.example` 复制并填真实值；**`.env` 已被 `.dockerignore` 排除，绝不会进构建上下文**（这里挡的是凭据泄露，不是"反正没 COPY"）
 - [ ] 模型端点与 MySQL 从**容器网络内**可达（`docker exec ai-agent-java curl -m 5 <模型地址>/v1/models`）
 - [ ] 并发/队列/超时按容量核定：`AGENT_ASYNC_CONCURRENCY`、`AGENT_SYNC_CONCURRENCY`、`AGENT_MAX_QUEUED_TASKS`、`AGENT_DEFAULT_TIMEOUT`

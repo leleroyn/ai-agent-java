@@ -1,6 +1,7 @@
 package com.jtzj.agent.runtime;
 
 import com.jtzj.agent.core.config.AgentProperties;
+import com.jtzj.agent.core.model.ToolCallRecord;
 import com.jtzj.agent.core.support.ToolTrace;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -83,10 +84,10 @@ public class AgentTaskRunner {
      * @param text        final assistant text (always best-effort)
      * @param usage       token usage, may be null when the provider reports none
      * @param workspace   the task's private directory, where any produced files live
-     * @param toolTrace   工具调用链 JSON（{@code {count,truncated,tools[],calls[]}}）；一条都没调时为 null
+     * @param toolCalls   这趟运行的工具调用链（一条调用一个元素）；空集合 = 一次都没调
      */
     public record RunOutcome(JsonNode result, String text, ChatUsage usage, Path workspace,
-                             String toolTrace) {
+                             List<ToolCallRecord> toolCalls) {
     }
 
     /**
@@ -114,9 +115,9 @@ public class AgentTaskRunner {
             return runInWorkspace(taskId, instruction, rewritten, schema, skills, budget,
                     modelName, taskDir, trace);
         } catch (AgentException e) {
-            // 失败也要带链：「断在哪一次工具调用」常常就是根因，TaskPoller 把它写进 tool_trace。
-            if (e.getToolTrace() == null) {
-                e.setToolTrace(trace.toJson());
+            // 失败也要带链：「断在哪一次工具调用」常常就是根因，TaskPoller 把它写进 agent_tool_call。
+            if (e.getToolCalls() == null) {
+                e.setToolCalls(trace.records());
             }
             throw e;
         } finally {
@@ -183,7 +184,7 @@ public class AgentTaskRunner {
                     "agent finished but produced no value matching outputSchema", false);
         }
 
-        return new RunOutcome(result, text, reply.getUsage(), taskDir, trace.toJson());
+        return new RunOutcome(result, text, reply.getUsage(), taskDir, trace.records());
     }
 
     /**

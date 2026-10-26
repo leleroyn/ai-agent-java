@@ -1,10 +1,12 @@
 package com.jtzj.agent.store;
 
+import com.jtzj.agent.core.model.ToolCallRecord;
 import com.jtzj.agent.core.model.TaskRecord;
 import com.jtzj.agent.core.model.TaskStatus;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -38,14 +40,12 @@ public interface TaskStore {
      * another worker can be overwritten by a late result.
      *
      * @param workerId must still own the row
-     * @param toolTrace 工具调用链 JSON；null = 不写该列
      * @return false when the row was cancelled or is no longer owned by this worker
      */
     boolean markCompleted(String taskId,
                           String workerId,
                           String resultJson,
                           String resultText,
-                          String toolTrace,
                           Long inputTokens,
                           Long outputTokens,
                           Long totalTokens,
@@ -54,7 +54,6 @@ public interface TaskStore {
 
     /**
      * @param workerId must still own the row; @return false when cancelled or lease stolen
-     * @param toolTrace 工具调用链 JSON，失败时它往往就是「断在哪一次调用」的答案；null = 不写该列
      */
     boolean markFailed(String taskId,
                        String workerId,
@@ -62,7 +61,6 @@ public interface TaskStore {
                        String errorMessage,
                        boolean retryable,
                        String resultText,
-                       String toolTrace,
                        Instant completedAt,
                        long durationMs);
 
@@ -135,4 +133,34 @@ public interface TaskStore {
      * @return true when this instance won the claim (safe to deliver)
      */
     boolean claimCallback(String taskId);
+
+    /**
+     * 写这趟任务的工具调用链：一条调用一行，写进 {@code agent_tool_call}（一对多的「多」）。
+     *
+     * <p>与终态写入分开，是刻意的：观测数据不值得让任务失败，也不该把 agent_task 的宽 UPDATE
+     * 再拖长。调用方必须包 try/catch，写失败只丢观测。
+     *
+     * @param attempt 这趟运行的尝试序号（agent_task.attempt），重试过的任务每一趟各留一条链
+     */
+    void saveToolCalls(String taskId, int attempt, List<ToolCallRecord> calls);
+
+    /**
+     * 读最近一次 attempt 的调用链，按 seq 升序。
+     *
+     * <p>子表不存在（生产还没执行 migration-007）时返回空集合而不是抛错：读任务详情
+     * 不能因为观测表缺失而失败。
+     */
+    List<ToolCallRecord> findToolCalls(String taskId);
+
+    /**
+     * {@link #find} 再带上调用链子表。给任务详情、回调负载这类读路径用。
+     *
+     * <p>认领和同步轮询走 {@link #find}：那里每几十毫秒读一次，不该每次都多打一条子表 SQL。
+     */
+    default Optional<TaskRecord> findWithToolCalls(String taskId) {
+        return find(taskId).map(record -> {
+            record.setToolCalls(findToolCalls(taskId));
+            return record;
+        });
+    }
 }

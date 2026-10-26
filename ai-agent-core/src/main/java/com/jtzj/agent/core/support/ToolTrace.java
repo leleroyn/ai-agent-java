@@ -1,8 +1,8 @@
 package com.jtzj.agent.core.support;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.jtzj.agent.core.model.ToolCallRecord;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -11,8 +11,6 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * 一次任务内的<b>工具调用链</b>：模型按什么顺序调了哪些工具、参数是什么、每次跑了多久、结果如何。
@@ -22,15 +20,17 @@ import org.slf4j.LoggerFactory;
  * 调用链把那一段过程留下来，任务详情里直接可见。
  *
  * <p>与 {@link CallLedger} 的分工：台账管<b>去重</b>（同参数不重跑，只存在任务目录里）；这里管
- * <b>观测</b>：按顺序记，落库 {@code agent_task.tool_trace}，并出现在任务查询响应里。
+ * <b>观测</b>：按顺序记，一条调用一行，落 {@code agent_tool_call}，并出现在任务查询响应里。
  *
  * <p>只记调用事实，不记返回内容：OCR 全文动辄几万字符，落库没有意义，结果本身在 result_json /
  * result_text 里。参数按 {@code maxArgsChars} 截断、条数按 {@code maxEntries} 截断，因为一条 shell
- * 命令可以带很长的路径列表。count 记真实次数，所以截断后仍看得出「一共调了 12 次」。
+ * 命令可以带很长的路径列表。计数记真实次数，所以截断后仍看得出「一共调了 12 次」。
+ *
+ * <p>一趟任务对应多行，是一对多：任务重试过就按 attempt 各留一套链，
+ * 唯一键 {@code (task_id, attempt, seq)} 让重复写入幂等。
  */
 public final class ToolTrace {
 
-    private static final Logger log = LoggerFactory.getLogger(ToolTrace.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     /** 一次调用：start 时建立，工具结果事件到达时补上耗时与状态。 */
@@ -50,6 +50,11 @@ public final class ToolTrace {
             this.atMs = atMs;
             this.startedAtNanos = startedAtNanos;
         }
+
+        ToolCallRecord toRecord() {
+            return new ToolCallRecord(seq, tool, args, atMs, durationMs,
+                    state == null ? "running" : state);
+        }
     }
 
     private final boolean enabled;
@@ -68,8 +73,8 @@ public final class ToolTrace {
     }
 
     /**
-     * 关掉采集：链不落库也不上线（{@link #toJson()} 恒为 null，不占数据库列、响应里没有该键），
-     * 但调用次数与工具名照记——{@link #isEmpty()} 是「文档任务必须调过工具」的判定依据，
+     * 关掉采集：链不落库也不上线（{@link #records()} 恒为空，子表里没有该任务的行，响应里也没有
+     * 该键），但调用次数与工具名照记——{@link #isEmpty()} 是「文档任务必须调过工具」的判定依据，
      * 关掉采集时它必须照常工作，否则每条文档任务都会被强制重试甚至判失败。
      */
     public static ToolTrace of(boolean enabled, int maxEntries, int maxArgsChars) {
@@ -81,7 +86,7 @@ public final class ToolTrace {
         if (tool == null) {
             return;
         }
-        // 计数与工具名永远记（enabled 只决定参数和链 JSON 留不留）：接地判定要用它。
+        // 计数与工具名永远记（enabled 只决定参数和链留不留）：接地判定要用它。
         Call call = new Call(total.incrementAndGet(), tool, enabled ? argsText(args) : null,
                 (System.nanoTime() - startedAtNanos) / 1_000_000L, System.nanoTime());
         seenTools.add(tool);
@@ -126,41 +131,19 @@ public final class ToolTrace {
     }
 
     /**
-     * 落库与上线用的 JSON：{@code {"count":7,"truncated":false,"tools":[...],"calls":[{"seq":1,
-     * "tool":"understand_document","args":"{...}","atMs":120,"ms":8300,"state":"success"}]}}。
+     * 链的行形式，按顺序一条调用一行写进 {@code agent_tool_call}。
      *
-     * @return null when nothing was recorded
+     * @return 采集关闭、或这趟任务一次工具都没调时为空集合
      */
-    public String toJson() {
-        int count = total.get();
-        if (!enabled || count == 0) {
-            return null;
+    public List<ToolCallRecord> records() {
+        if (!enabled || total.get() == 0) {
+            return List.of();
         }
-        ObjectNode root = MAPPER.createObjectNode();
-        root.put("count", count);
-        root.put("truncated", calls.size() < count);
-        ArrayNode names = root.putArray("tools");
-        tools().forEach(names::add);
-        ArrayNode arr = root.putArray("calls");
+        List<ToolCallRecord> out = new ArrayList<>(calls.size());
         for (Call call : calls) {
-            ObjectNode node = arr.addObject();
-            node.put("seq", call.seq);
-            node.put("tool", call.tool);
-            if (call.args != null) {
-                node.put("args", call.args);
-            }
-            node.put("atMs", call.atMs);
-            if (call.durationMs != null) {
-                node.put("ms", call.durationMs);
-            }
-            node.put("state", call.state == null ? "running" : call.state);
+            out.add(call.toRecord());
         }
-        try {
-            return MAPPER.writeValueAsString(root);
-        } catch (Exception e) {
-            log.warn("tool trace serialization failed: {}", e.toString());
-            return null;
-        }
+        return out;
     }
 
     private String argsText(Map<String, Object> args) {

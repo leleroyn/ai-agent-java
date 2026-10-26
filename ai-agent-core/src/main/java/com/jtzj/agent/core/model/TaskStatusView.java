@@ -4,6 +4,10 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 /**
  * Response to GET /api/v1/agent/task/{taskId}. Null fields are omitted.
@@ -17,7 +21,7 @@ import java.time.Instant;
  * @param metadata   the caller's own business context, echoed back verbatim so a poll response
  *                   can be matched to the originating order without keeping a side map or
  *                   querying {@code agent_task.business_meta}
- * @param tools      工具调用链 {@code {count,truncated,tools[],calls[]}}；没记时该键不出现
+ * @param tools      工具调用链数组，一条调用一个元素（顺序即调用顺序）；没记时该键不出现
  */
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public record TaskStatusView(
@@ -70,15 +74,26 @@ public record TaskStatusView(
             }
         }
 
-        // Same neutral-tree rule as result and metadata: the stored text is parsed here, and a
-        // corrupt value degrades to the raw text rather than failing the whole read.
+        // 调用链来自子表 agent_tool_call 的行（一条调用一个元素）。Map 而不是 record：
+        // args / ms 可能为 null，Map 逐字段省略，响应里不出现空键。
         Object tools = null;
-        if (r.getToolTrace() != null && !r.getToolTrace().isBlank()) {
-            try {
-                tools = jackson2.readValue(r.getToolTrace(), Object.class);
-            } catch (Exception e) {
-                tools = r.getToolTrace();
+        if (r.getToolCalls() != null && !r.getToolCalls().isEmpty()) {
+            List<Map<String, Object>> rows = new ArrayList<>(r.getToolCalls().size());
+            for (ToolCallRecord call : r.getToolCalls()) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("seq", call.seq());
+                row.put("tool", call.tool());
+                if (call.args() != null) {
+                    row.put("args", call.args());
+                }
+                row.put("atMs", call.atMs());
+                if (call.durationMs() != null) {
+                    row.put("ms", call.durationMs());
+                }
+                row.put("state", call.state());
+                rows.add(row);
             }
+            tools = rows;
         }
 
         return new TaskStatusView(

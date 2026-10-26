@@ -1,5 +1,6 @@
 package com.jtzj.agent.store;
 
+import com.jtzj.agent.core.model.ToolCallRecord;
 import com.jtzj.agent.core.model.TaskRecord;
 import com.jtzj.agent.core.model.TaskStatus;
 import org.slf4j.Logger;
@@ -15,6 +16,7 @@ import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.function.Supplier;
@@ -39,7 +41,7 @@ public class MysqlTaskStore implements TaskStore {
             task_id, status, instruction, output_schema, business_meta, timeout_seconds, skill_names, model_name,
             sync_requested, callback_url, callback_status, callback_at,
             result_json, result_text, error_code, error_message, retryable,
-            input_tokens, output_tokens, total_tokens, duration_ms, tool_trace, attempt,
+            input_tokens, output_tokens, total_tokens, duration_ms, attempt,
             created_at, started_at, completed_at, updated_at
             """;
 
@@ -76,7 +78,6 @@ public class MysqlTaskStore implements TaskStore {
         r.setOutputTokens(readLong(rs, "output_tokens"));
         r.setTotalTokens(readLong(rs, "total_tokens"));
         r.setDurationMs(readLong(rs, "duration_ms"));
-        r.setToolTrace(rs.getString("tool_trace"));
         r.setCreatedAt(readInstant(rs, "created_at"));
         r.setStartedAt(readInstant(rs, "started_at"));
         r.setCompletedAt(readInstant(rs, "completed_at"));
@@ -313,7 +314,6 @@ public class MysqlTaskStore implements TaskStore {
                                  String workerId,
                                  String resultJson,
                                  String resultText,
-                                 String toolTrace,
                                  Long inputTokens,
                                  Long outputTokens,
                                  Long totalTokens,
@@ -321,7 +321,7 @@ public class MysqlTaskStore implements TaskStore {
                                  long durationMs) {
         String sql = """
                 UPDATE agent_task
-                   SET status = 'completed', result_json = ?, result_text = ?, tool_trace = ?,
+                   SET status = 'completed', result_json = ?, result_text = ?,
                        input_tokens = ?, output_tokens = ?, total_tokens = ?,
                        duration_ms = ?, completed_at = ?, updated_at = ?
                  WHERE task_id = ? AND worker_id = ? AND status <> 'cancelled'
@@ -330,7 +330,6 @@ public class MysqlTaskStore implements TaskStore {
                 () -> jdbc.update(sql,
                         resultJson,
                         resultText,
-                        toolTrace,
                         inputTokens,
                         outputTokens,
                         totalTokens,
@@ -348,13 +347,12 @@ public class MysqlTaskStore implements TaskStore {
                               String errorMessage,
                               boolean retryable,
                               String resultText,
-                              String toolTrace,
                               Instant completedAt,
                               long durationMs) {
         String sql = """
                 UPDATE agent_task
                    SET status = 'failed', error_code = ?, error_message = ?, retryable = ?,
-                       result_text = ?, tool_trace = ?, duration_ms = ?, completed_at = ?, updated_at = ?
+                       result_text = ?, duration_ms = ?, completed_at = ?, updated_at = ?
                  WHERE task_id = ? AND worker_id = ? AND status <> 'cancelled'
                 """;
         return retryOnContention("markFailed " + taskId,
@@ -363,7 +361,6 @@ public class MysqlTaskStore implements TaskStore {
                         truncate(errorMessage, 4000),
                         retryable,
                         resultText,
-                        toolTrace,
                         durationMs,
                         ts(completedAt),
                         ts(completedAt),
@@ -404,6 +401,51 @@ public class MysqlTaskStore implements TaskStore {
     public boolean claimCallback(String taskId) {
         return jdbc.update("UPDATE agent_task SET callback_status = 'delivering'"
                 + " WHERE task_id = ? AND callback_status = 'pending'", taskId) == 1;
+    }
+
+    /**
+     * 一条调用一行写进 agent_tool_call。{@code INSERT IGNORE} + 唯一键
+     * (task_id, attempt, seq)：终态写入重试时不会写出重复的行。
+     */
+    @Override
+    public void saveToolCalls(String taskId, int attempt, List<ToolCallRecord> calls) {
+        if (calls == null || calls.isEmpty()) {
+            return;
+        }
+        Timestamp now = Timestamp.from(Instant.now());
+        String sql = """
+                INSERT IGNORE INTO agent_tool_call
+                    (task_id, attempt, seq, tool, args, at_ms, duration_ms, state, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """;
+        List<Object[]> batch = new ArrayList<>(calls.size());
+        for (ToolCallRecord call : calls) {
+            batch.add(new Object[]{taskId, attempt, call.seq(), call.tool(), call.args(),
+                    call.atMs(), call.durationMs(), call.state(), now});
+        }
+        jdbc.batchUpdate(sql, batch);
+    }
+
+    /**
+     * 最近一次 attempt 的链：重试过的任务只把最后那一趟返回给调用方，
+     * 前面几趟留在表里按 attempt 可查。子表缺失时返回空（不能让任务详情因观测表挂掉）。
+     */
+    @Override
+    public List<ToolCallRecord> findToolCalls(String taskId) {
+        String sql = """
+                SELECT seq, tool, args, at_ms, duration_ms, state FROM agent_tool_call
+                 WHERE task_id = ?
+                   AND attempt = (SELECT MAX(attempt) FROM agent_tool_call WHERE task_id = ?)
+                 ORDER BY seq ASC
+                """;
+        try {
+            return jdbc.query(sql, (rs, n) -> new ToolCallRecord(rs.getInt("seq"),
+                    rs.getString("tool"), rs.getString("args"), rs.getLong("at_ms"),
+                    readLong(rs, "duration_ms"), rs.getString("state")), taskId, taskId);
+        } catch (RuntimeException e) {
+            log.debug("tool calls unavailable for {}: {}", taskId, e.toString());
+            return List.of();
+        }
     }
 
     private static String truncate(String value, int max) {

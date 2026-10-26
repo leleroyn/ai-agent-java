@@ -127,7 +127,8 @@ public class AgentTaskService {
 
         boolean created = store.insertIfAbsent(candidate);
         if (!created) {
-            TaskRecord existing = store.find(taskId)
+            // 重放要回原任务的状态：调用链一并带上，和 GET /task/{id} 返回的形状一致。
+            TaskRecord existing = store.findWithToolCalls(taskId)
                     .orElseThrow(() -> new AgentException(ErrorCodes.AGENT_EXECUTION_FAILED,
                             "task row vanished between insert and read: " + taskId, true));
             log.info("task {} replay, status={}", taskId, existing.getStatus().wire());
@@ -151,8 +152,9 @@ public class AgentTaskService {
         return new Submission(candidate, true, budget);
     }
 
+    /** 任务详情：带 agent_tool_call 的调用链（一对多的「多」）。认领与同步轮询不走这里。 */
     public Optional<TaskRecord> find(String taskId) {
-        return store.find(taskId);
+        return store.findWithToolCalls(taskId);
     }
 
     /**

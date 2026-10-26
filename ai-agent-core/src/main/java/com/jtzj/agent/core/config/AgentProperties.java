@@ -791,15 +791,15 @@ public class AgentProperties {
      */
     public static class Trace {
         /**
-         * false = 链不落库也不进响应（不写 {@code tool_trace} 列）。调用次数与工具名照记，
-         * 「文档任务必须调过工具」的判定不受影响。老库还没执行 migration-006 时用它关掉采集。
+         * false = 不采集：{@code agent_tool_call} 里没有该任务的行，响应里也没有 {@code tools} 键。
+         * 调用次数与工具名照记，「文档任务必须调过工具」的判定不受影响。
          */
         private boolean enabled = true;
         /**
-         * 链里最多记多少次调用；超出的只计入 {@code count}，不进链（并带 truncated 标记）。
-         * runner.max-iters 默认 20，正常任务远用不到这个上限，它是防并行多轮把列写爆的兜底。
+         * 一趟任务最多写多少行；超出就不写子表行（计数照记，日志里的 toolCalls= 是真实次数）。
+         * runner.max-iters 默认 20，一趟任务正常到不了这个上限，它是防跑飞的任务写几千行进来。
          */
-        private int maxEntries = 80;
+        private int maxEntries = 200;
         /** 单次调用的参数截断长度：一条 shell 命令可以带一长串路径。 */
         private int maxArgsChars = 400;
 

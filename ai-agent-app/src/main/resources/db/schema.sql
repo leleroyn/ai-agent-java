@@ -32,7 +32,6 @@ CREATE TABLE IF NOT EXISTS agent_task (
     output_tokens  BIGINT       NULL,
     total_tokens   BIGINT       NULL,
     duration_ms    BIGINT       NULL,
-    tool_trace     MEDIUMTEXT   NULL  COMMENT 'agent 工具调用链（JSON）：count/truncated/tools/calls[]，参数与条数在服务端截断',
 
     -- queue machinery: the table is also the work queue (no in-memory queue, no Redis)
     worker_id        VARCHAR(64)  NULL     COMMENT 'which process claimed this task',
@@ -48,3 +47,22 @@ CREATE TABLE IF NOT EXISTS agent_task (
     KEY idx_status_created (status, created_at),
     KEY idx_lease (status, lease_expires_at)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci;
+
+-- 工具调用链：一条调用一行，agent_task 的一对多子表（migration-007 同款）。
+-- 写它在终态写入之后、包在 try/catch 里：观测数据不值得让任务失败，表缺失也不影响任务。
+CREATE TABLE IF NOT EXISTS agent_tool_call (
+    id           BIGINT       NOT NULL AUTO_INCREMENT,
+    task_id      VARCHAR(64)  NOT NULL COMMENT 'agent_task.task_id：一对多的「一」',
+    attempt      INT          NOT NULL DEFAULT 0 COMMENT '第几次认领这趟运行（agent_task.attempt）；重试过的任务每一趟各留一条链',
+    seq          INT          NOT NULL COMMENT '本次运行内的第几次调用，从 1 开始',
+    tool         VARCHAR(64)  NOT NULL COMMENT '工具名；模型跑镜像内置 ips CLI 时记的是 shell 工具本身',
+    args         TEXT         NULL     COMMENT '调用参数 JSON，服务端按 agent.trace.max-args-chars 截断；NULL=采集关闭',
+    at_ms        BIGINT       NOT NULL COMMENT '距本次运行开始的毫秒数',
+    duration_ms  BIGINT       NULL     COMMENT '该次调用耗时；NULL=没等到结果就中断',
+    state        VARCHAR(16)  NOT NULL COMMENT 'success|error|denied|interrupted|running',
+    created_at   DATETIME(3)  NOT NULL,
+
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_task_attempt_seq (task_id, attempt, seq)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci
+  COMMENT = 'agent 工具调用链：一条调用一行，agent_task 的一对多子表。纯观测，不参与任务状态机';
