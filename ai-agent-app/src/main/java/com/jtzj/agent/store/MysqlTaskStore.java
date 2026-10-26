@@ -45,6 +45,9 @@ public class MysqlTaskStore implements TaskStore {
             created_at, started_at, completed_at, updated_at
             """;
 
+    /** 保留期清理一次删多少行：5.7 没有 chunk 概念，一次删太多会把锁握太久。 */
+    private static final int PURGE_BATCH = 5000;
+
     private final JdbcTemplate jdbc;
 
     public MysqlTaskStore(JdbcTemplate jdbc) {
@@ -446,6 +449,30 @@ public class MysqlTaskStore implements TaskStore {
             log.debug("tool calls unavailable for {}: {}", taskId, e.toString());
             return List.of();
         }
+    }
+
+    /**
+     * 保留期清理：按 {@code created_at} 分批删，每批 {@value #PURGE_BATCH} 行，删到不足一批为止。
+     *
+     * <p>{@code at_ms} 是「距本次运行开始的毫秒数」不是时刻，所以保留期只能按 {@code created_at} 算。
+     * 索引见 {@code db/migration-008-tool-call-retention.sql}；没有索引也只是全表扫，不影响正确性。
+     * 子表缺失（老库没执行 migration-007）时按 0 返回：清理失败不该有任何下游影响。
+     */
+    @Override
+    public int deleteToolCallsOlderThan(Instant cutoff) {
+        String sql = "DELETE FROM agent_tool_call WHERE created_at < ? LIMIT " + PURGE_BATCH;
+        Timestamp before = Timestamp.from(cutoff);
+        int total = 0;
+        try {
+            int deleted;
+            do {
+                deleted = jdbc.update(sql, before);
+                total += deleted;
+            } while (deleted == PURGE_BATCH);
+        } catch (RuntimeException e) {
+            log.debug("agent_tool_call purge skipped: {}", e.toString());
+        }
+        return total;
     }
 
     private static String truncate(String value, int max) {

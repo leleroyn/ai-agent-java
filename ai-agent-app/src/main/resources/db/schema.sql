@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS agent_tool_call (
     created_at   DATETIME(3)  NOT NULL,
 
     PRIMARY KEY (id),
-    UNIQUE KEY uk_task_attempt_seq (task_id, attempt, seq)
+    UNIQUE KEY uk_task_attempt_seq (task_id, attempt, seq),
+    KEY idx_created_at (created_at)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci
   COMMENT = 'agent 工具调用链：一条调用一行，agent_task 的一对多子表。纯观测，不参与任务状态机';

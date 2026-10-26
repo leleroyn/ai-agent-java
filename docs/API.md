@@ -698,6 +698,7 @@ done
 | 工具调用链采集开关 | true | `AGENT_TRACE_TOOLS` |
 | 一趟任务最多写多少行调用链（超出的不入库） | 200 | `AGENT_TRACE_MAX_ENTRIES` |
 | 工具链单次参数截断 | 400 字符 | `AGENT_TRACE_MAX_ARGS_CHARS` |
+| 调用链行保留天数（0=不清理，每天 03:30 删一次） | 30 | `AGENT_TRACE_RETENTION_DAYS` |
 
 ---
 

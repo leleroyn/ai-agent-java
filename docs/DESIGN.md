@@ -483,3 +483,9 @@ agent 用 `execute_shell_command` 直接调。目前只有 `ips`（Rust/musl sta
 **关掉**：`agent.trace.enabled=false`（`AGENT_TRACE_TOOLS=false`）时子表里没有该任务的行、响应里也没有
 `tools` 键；调用次数与工具名仍在记，所以 `force-document-tool` 的接地判定（§11）不受开关影响。
 老库没执行 migration-007 也**不用**关采集：链是独立的一次插入，不掺进终态那条 SQL。
+
+**保留期**：这是一张只写的行存表，每任务多 N 行、只涨不缩，所以 `service/ToolCallRetention` 每天 03:30（容器时区，一天里任务量最低的窗口）删一次
+`created_at` 早于 `agent.trace.retention-days`（默认 **30 天**，置 0 = 不清理）的行。删除按 `created_at`
+而不是 `at_ms`——后者是「距本次运行开始的毫秒数」不是时刻。分批删（每批 5000 行，删到不足一批为止），
+索引由 `migration-008-tool-call-retention.sql` 建。它不在任务链路上：子表缺失返回 0、SQL 异常只留 WARN，
+多实例各删各的（按条件 DELETE，重复执行无副作用）。

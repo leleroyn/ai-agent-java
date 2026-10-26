@@ -163,4 +163,16 @@ public interface TaskStore {
             return record;
         });
     }
+
+    /**
+     * 保留期清理：删掉 {@code created_at} 早于 cutoff 的调用链行（{@code agent.trace.retention-days}）。
+     *
+     * <p>纯 housekeeping，不参与任务状态机：子表不存在（老库没执行 migration-007）时返回 0，
+     * 绝不把异常抛给调用方。
+     *
+     * @return 删除的行数
+     */
+    default int deleteToolCallsOlderThan(Instant cutoff) {
+        return 0;
+    }
 }

@@ -802,6 +802,11 @@ public class AgentProperties {
         private int maxEntries = 200;
         /** 单次调用的参数截断长度：一条 shell 命令可以带一长串路径。 */
         private int maxArgsChars = 400;
+        /**
+         * 调用链行的保留天数：每天删一次 created_at 早于这个天数的行。
+         * 0 或负数 = 不清理（行存一直涨，只有要做长期统计时才这么配）。
+         */
+        private int retentionDays = 30;
 
         public boolean isEnabled() {
             return enabled;
@@ -825,6 +830,14 @@ public class AgentProperties {
 
         public void setMaxArgsChars(int maxArgsChars) {
             this.maxArgsChars = maxArgsChars;
+        }
+
+        public int getRetentionDays() {
+            return retentionDays;
+        }
+
+        public void setRetentionDays(int retentionDays) {
+            this.retentionDays = retentionDays;
         }
     }
 
