@@ -17,6 +17,7 @@ import java.time.Instant;
  * @param metadata   the caller's own business context, echoed back verbatim so a poll response
  *                   can be matched to the originating order without keeping a side map or
  *                   querying {@code agent_task.business_meta}
+ * @param tools      工具调用链 {@code {count,truncated,tools[],calls[]}}；没记时该键不出现
  */
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public record TaskStatusView(
@@ -27,6 +28,7 @@ public record TaskStatusView(
         String resultText,
         TaskError error,
         TaskUsage usage,
+        Object tools,
         Instant createdAt,
         Instant startedAt,
         Instant completedAt,
@@ -68,6 +70,17 @@ public record TaskStatusView(
             }
         }
 
+        // Same neutral-tree rule as result and metadata: the stored text is parsed here, and a
+        // corrupt value degrades to the raw text rather than failing the whole read.
+        Object tools = null;
+        if (r.getToolTrace() != null && !r.getToolTrace().isBlank()) {
+            try {
+                tools = jackson2.readValue(r.getToolTrace(), Object.class);
+            } catch (Exception e) {
+                tools = r.getToolTrace();
+            }
+        }
+
         return new TaskStatusView(
                 r.getTaskId(),
                 r.getStatus().wire(),
@@ -76,6 +89,7 @@ public record TaskStatusView(
                 r.getResultText(),
                 err,
                 usage,
+                tools,
                 r.getCreatedAt(),
                 r.getStartedAt(),
                 r.getCompletedAt(),

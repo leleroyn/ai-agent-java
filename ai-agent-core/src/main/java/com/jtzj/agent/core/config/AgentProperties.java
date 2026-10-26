@@ -26,6 +26,7 @@ public class AgentProperties {
     private final Tools tools = new Tools();
     private final Skills skills = new Skills();
     private final Limits limits = new Limits();
+    private final Trace trace = new Trace();
 
     /**
      * 纯文本子调用（{@code extract_document_fields} / {@code understand_document} 的文本分支）
@@ -106,6 +107,10 @@ public class AgentProperties {
 
     public Limits getLimits() {
         return limits;
+    }
+
+    public Trace getTrace() {
+        return trace;
     }
 
     /**
@@ -777,6 +782,49 @@ public class AgentProperties {
 
         public void setMaxInlineChars(int maxInlineChars) {
             this.maxInlineChars = maxInlineChars;
+        }
+    }
+
+    /**
+     * 工具调用链（一趟任务里 agent 按顺序调用的工具序列）的采集参数。链落
+     * {@code agent_task.tool_trace}，并由 {@code GET /task/{id}} 的 {@code tools} 字段返回。
+     */
+    public static class Trace {
+        /**
+         * false = 链不落库也不进响应（不写 {@code tool_trace} 列）。调用次数与工具名照记，
+         * 「文档任务必须调过工具」的判定不受影响。老库还没执行 migration-006 时用它关掉采集。
+         */
+        private boolean enabled = true;
+        /**
+         * 链里最多记多少次调用；超出的只计入 {@code count}，不进链（并带 truncated 标记）。
+         * runner.max-iters 默认 20，正常任务远用不到这个上限，它是防并行多轮把列写爆的兜底。
+         */
+        private int maxEntries = 80;
+        /** 单次调用的参数截断长度：一条 shell 命令可以带一长串路径。 */
+        private int maxArgsChars = 400;
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public int getMaxEntries() {
+            return maxEntries;
+        }
+
+        public void setMaxEntries(int maxEntries) {
+            this.maxEntries = maxEntries;
+        }
+
+        public int getMaxArgsChars() {
+            return maxArgsChars;
+        }
+
+        public void setMaxArgsChars(int maxArgsChars) {
+            this.maxArgsChars = maxArgsChars;
         }
     }
 

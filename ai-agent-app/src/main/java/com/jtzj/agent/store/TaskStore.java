@@ -38,25 +38,31 @@ public interface TaskStore {
      * another worker can be overwritten by a late result.
      *
      * @param workerId must still own the row
+     * @param toolTrace 工具调用链 JSON；null = 不写该列
      * @return false when the row was cancelled or is no longer owned by this worker
      */
     boolean markCompleted(String taskId,
                           String workerId,
                           String resultJson,
                           String resultText,
+                          String toolTrace,
                           Long inputTokens,
                           Long outputTokens,
                           Long totalTokens,
                           Instant completedAt,
                           long durationMs);
 
-    /** @param workerId must still own the row; @return false when cancelled or lease stolen */
+    /**
+     * @param workerId must still own the row; @return false when cancelled or lease stolen
+     * @param toolTrace 工具调用链 JSON，失败时它往往就是「断在哪一次调用」的答案；null = 不写该列
+     */
     boolean markFailed(String taskId,
                        String workerId,
                        String errorCode,
                        String errorMessage,
                        boolean retryable,
                        String resultText,
+                       String toolTrace,
                        Instant completedAt,
                        long durationMs);
 

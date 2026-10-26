@@ -39,7 +39,7 @@ public class MysqlTaskStore implements TaskStore {
             task_id, status, instruction, output_schema, business_meta, timeout_seconds, skill_names, model_name,
             sync_requested, callback_url, callback_status, callback_at,
             result_json, result_text, error_code, error_message, retryable,
-            input_tokens, output_tokens, total_tokens, duration_ms, attempt,
+            input_tokens, output_tokens, total_tokens, duration_ms, tool_trace, attempt,
             created_at, started_at, completed_at, updated_at
             """;
 
@@ -76,6 +76,7 @@ public class MysqlTaskStore implements TaskStore {
         r.setOutputTokens(readLong(rs, "output_tokens"));
         r.setTotalTokens(readLong(rs, "total_tokens"));
         r.setDurationMs(readLong(rs, "duration_ms"));
+        r.setToolTrace(rs.getString("tool_trace"));
         r.setCreatedAt(readInstant(rs, "created_at"));
         r.setStartedAt(readInstant(rs, "started_at"));
         r.setCompletedAt(readInstant(rs, "completed_at"));
@@ -312,6 +313,7 @@ public class MysqlTaskStore implements TaskStore {
                                  String workerId,
                                  String resultJson,
                                  String resultText,
+                                 String toolTrace,
                                  Long inputTokens,
                                  Long outputTokens,
                                  Long totalTokens,
@@ -319,7 +321,7 @@ public class MysqlTaskStore implements TaskStore {
                                  long durationMs) {
         String sql = """
                 UPDATE agent_task
-                   SET status = 'completed', result_json = ?, result_text = ?,
+                   SET status = 'completed', result_json = ?, result_text = ?, tool_trace = ?,
                        input_tokens = ?, output_tokens = ?, total_tokens = ?,
                        duration_ms = ?, completed_at = ?, updated_at = ?
                  WHERE task_id = ? AND worker_id = ? AND status <> 'cancelled'
@@ -328,6 +330,7 @@ public class MysqlTaskStore implements TaskStore {
                 () -> jdbc.update(sql,
                         resultJson,
                         resultText,
+                        toolTrace,
                         inputTokens,
                         outputTokens,
                         totalTokens,
@@ -345,12 +348,13 @@ public class MysqlTaskStore implements TaskStore {
                               String errorMessage,
                               boolean retryable,
                               String resultText,
+                              String toolTrace,
                               Instant completedAt,
                               long durationMs) {
         String sql = """
                 UPDATE agent_task
                    SET status = 'failed', error_code = ?, error_message = ?, retryable = ?,
-                       result_text = ?, duration_ms = ?, completed_at = ?, updated_at = ?
+                       result_text = ?, tool_trace = ?, duration_ms = ?, completed_at = ?, updated_at = ?
                  WHERE task_id = ? AND worker_id = ? AND status <> 'cancelled'
                 """;
         return retryOnContention("markFailed " + taskId,
@@ -359,6 +363,7 @@ public class MysqlTaskStore implements TaskStore {
                         truncate(errorMessage, 4000),
                         retryable,
                         resultText,
+                        toolTrace,
                         durationMs,
                         ts(completedAt),
                         ts(completedAt),

@@ -5,6 +5,11 @@ public class AgentException extends RuntimeException {
 
     private final String code;
     private final boolean retryable;
+    /**
+     * 失败发生时这条任务已经发生的工具调用链（JSON，见 core.support.ToolTrace）。由 runner 在抛出
+     * 前附上，让失败的任务也看得到「跑到哪一步断的」。可为 null。
+     */
+    private String toolTrace;
 
     public AgentException(String code, String message, boolean retryable) {
         super(message);
@@ -24,5 +29,13 @@ public class AgentException extends RuntimeException {
 
     public boolean isRetryable() {
         return retryable;
+    }
+
+    public String getToolTrace() {
+        return toolTrace;
+    }
+
+    public void setToolTrace(String toolTrace) {
+        this.toolTrace = toolTrace;
     }
 }

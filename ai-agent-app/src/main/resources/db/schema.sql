@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS agent_task (
     output_tokens  BIGINT       NULL,
     total_tokens   BIGINT       NULL,
     duration_ms    BIGINT       NULL,
+    tool_trace     MEDIUMTEXT   NULL  COMMENT 'agent 工具调用链（JSON）：count/truncated/tools/calls[]，参数与条数在服务端截断',
 
     -- queue machinery: the table is also the work queue (no in-memory queue, no Redis)
     worker_id        VARCHAR(64)  NULL     COMMENT 'which process claimed this task',

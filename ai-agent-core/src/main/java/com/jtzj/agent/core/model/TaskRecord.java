@@ -40,6 +40,8 @@ public class TaskRecord {
     private Long outputTokens;
     private Long totalTokens;
     private Long durationMs;
+    /** 工具调用链 JSON：{count,truncated,tools[],calls[]}；null = 没记（开关关掉或老任务）。 */
+    private String toolTrace;
 
     private Instant createdAt;
     private Instant startedAt;
@@ -220,6 +222,14 @@ public class TaskRecord {
 
     public void setDurationMs(Long durationMs) {
         this.durationMs = durationMs;
+    }
+
+    public String getToolTrace() {
+        return toolTrace;
+    }
+
+    public void setToolTrace(String toolTrace) {
+        this.toolTrace = toolTrace;
     }
 
     public Instant getCreatedAt() {

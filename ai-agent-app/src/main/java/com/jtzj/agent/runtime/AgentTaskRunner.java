@@ -1,6 +1,7 @@
 package com.jtzj.agent.runtime;
 
 import com.jtzj.agent.core.config.AgentProperties;
+import com.jtzj.agent.core.support.ToolTrace;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.agentscope.core.ReActAgent;
@@ -21,8 +22,6 @@ import reactor.core.publisher.Mono;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeoutException;
 import java.util.regex.Pattern;
 import com.jtzj.agent.core.error.AgentException;
@@ -84,8 +83,10 @@ public class AgentTaskRunner {
      * @param text        final assistant text (always best-effort)
      * @param usage       token usage, may be null when the provider reports none
      * @param workspace   the task's private directory, where any produced files live
+     * @param toolTrace   工具调用链 JSON（{@code {count,truncated,tools[],calls[]}}）；一条都没调时为 null
      */
-    public record RunOutcome(JsonNode result, String text, ChatUsage usage, Path workspace) {
+    public record RunOutcome(JsonNode result, String text, ChatUsage usage, Path workspace,
+                             String toolTrace) {
     }
 
     /**
@@ -103,11 +104,21 @@ public class AgentTaskRunner {
     public RunOutcome run(String taskId, String instruction, JsonNode schema,
                           List<String> skills, Duration budget, String modelName, boolean sync) {
         Path taskDir = workspaceFactory.create(taskId);
+        // 调用链从任务一开始就记：来源下载失败也要留下链，失败的任务同样要落库。
+        ToolTrace trace = ToolTrace.of(props.getTrace().isEnabled(),
+                props.getTrace().getMaxEntries(), props.getTrace().getMaxArgsChars());
         try {
             // 指令里的文件 URL 先抓成 src/ 下的本地文件，并把指令里的 URL 换成相对路径：
             // 工具只吃本地路径，同一份 30MB 扫描件不会在一条任务里被下载好几遍。
             String rewritten = sourceIngestor.ingest(instruction, taskDir, sync).instruction();
-            return runInWorkspace(taskId, instruction, rewritten, schema, skills, budget, modelName, taskDir);
+            return runInWorkspace(taskId, instruction, rewritten, schema, skills, budget,
+                    modelName, taskDir, trace);
+        } catch (AgentException e) {
+            // 失败也要带链：「断在哪一次工具调用」常常就是根因，TaskPoller 把它写进 tool_trace。
+            if (e.getToolTrace() == null) {
+                e.setToolTrace(trace.toJson());
+            }
+            throw e;
         } finally {
             // 唯一的清理开关：true 时整个任务目录（含 src/、.ocr/、.ingest/）一起删，
             // 否则每份扫描件都在盘上留几十 MB；false 时一律保留，测试环境靠它事后排查。
@@ -123,9 +134,8 @@ public class AgentTaskRunner {
      */
     private RunOutcome runInWorkspace(String taskId, String instruction, String rewritten,
                                       JsonNode schema, List<String> skills, Duration budget,
-                                      String modelName, Path taskDir) {
-        Set<String> invokedTools = ConcurrentHashMap.newKeySet();
-        ReActAgent agent = newAgent(taskDir, skills, modelName, invokedTools, budget);
+                                      String modelName, Path taskDir, ToolTrace trace) {
+        ReActAgent agent = newAgent(taskDir, skills, modelName, trace, budget);
         RuntimeContext ctx = RuntimeContext.builder()
                 .sessionId("task-" + taskId)
                 .userId("agent-service")
@@ -152,9 +162,9 @@ public class AgentTaskRunner {
         if (reply == null) {
             throw new AgentException(ErrorCodes.NO_RESULT, "agent returned no message", true);
         }
-        if (ungroundedAnswer(instruction, invokedTools)) {
+        if (ungroundedAnswer(instruction, trace)) {
             reply = answerGroundedInTools(taskId, instruction, taskDir, skills, modelName, prompt, schema,
-                    freeFormFirst, ctx, invokedTools, budget, startedAt);
+                    freeFormFirst, ctx, trace, budget, startedAt);
             if (reply == null) {
                 throw new AgentException(ErrorCodes.NO_RESULT,
                         "document instruction answered without any tool call (guard disabled)", false);
@@ -173,7 +183,7 @@ public class AgentTaskRunner {
                     "agent finished but produced no value matching outputSchema", false);
         }
 
-        return new RunOutcome(result, text, reply.getUsage(), taskDir);
+        return new RunOutcome(result, text, reply.getUsage(), taskDir, trace.toJson());
     }
 
     /**
@@ -206,7 +216,7 @@ public class AgentTaskRunner {
     private Msg answerGroundedInTools(String taskId, String instruction, Path taskDir, List<String> skills,
                                       String modelName, String prompt, JsonNode schema,
                                       boolean freeFormFirst, RuntimeContext ctx,
-                                      Set<String> invokedTools, Duration budget, long startedAt) {
+                                      ToolTrace trace, Duration budget, long startedAt) {
         if (!props.getRunner().isForceDocumentTool()) {
             log.warn("task {} answered a document instruction with no tool call (guard disabled)", taskId);
             return null;
@@ -218,8 +228,8 @@ public class AgentTaskRunner {
                     "document instruction answered without any tool call, and no budget left to retry", false);
         }
         log.warn("task {} used no tool for a document instruction; retrying once with a forced tool call", taskId);
-        invokedTools.clear();
-        ReActAgent retry = newAgent(taskDir, skills, modelName, invokedTools, left);
+        // 链不清空：重试那一趟的调用接在后面，一条链完整反映这次任务到底跑过什么。
+        ReActAgent retry = newAgent(taskDir, skills, modelName, trace, left);
         String nudged = prompt + "\n\n强制要求：本任务涉及的文件必须先通过工具读取（extract_document_fields / "
                 + "understand_document，或匹配技能规定的接口调用）。没有工具返回的内容时不得给出任何字段值，"
                 + "缺失字段一律写 null。";
@@ -227,7 +237,7 @@ public class AgentTaskRunner {
         if (second == null) {
             throw new AgentException(ErrorCodes.NO_RESULT, "agent returned no message", true);
         }
-        if (ungroundedAnswer(instruction, invokedTools)) {
+        if (ungroundedAnswer(instruction, trace)) {
             throw new AgentException(ErrorCodes.NO_RESULT,
                     "instruction references a document but the model never called a tool; refusing to "
                             + "return values that could only come from model memory", false);
@@ -235,12 +245,12 @@ public class AgentTaskRunner {
         return second;
     }
 
-    private static boolean ungroundedAnswer(String instruction, Set<String> invokedTools) {
-        return invokedTools.isEmpty() && DOCUMENT_REFERENCE.matcher(instruction).find();
+    private static boolean ungroundedAnswer(String instruction, ToolTrace trace) {
+        return trace.isEmpty() && DOCUMENT_REFERENCE.matcher(instruction).find();
     }
 
     private ReActAgent newAgent(Path taskDir, List<String> skills, String modelName,
-                                Set<String> invokedTools, Duration toolTimeout) {
+                                ToolTrace trace, Duration toolTimeout) {
         AgentProperties.Runner runner = props.getRunner();
         PermissionMode mode;
         try {
@@ -257,7 +267,7 @@ public class AgentTaskRunner {
                 .toolkit(toolkitFactory.build(taskDir))
                 .permissionContext(PermissionContextState.builder().mode(mode).build())
                 .maxIters(runner.getMaxIters())
-                .middleware(new ToolUsageMiddleware(invokedTools));
+                .middleware(new ToolTraceMiddleware(trace));
 
         // AgentScope applies ExecutionConfig.TOOL_DEFAULTS (5 min per tool call, no retry) to
         // every tool call unless the agent overrides it. Our task budgets are longer than that,
