@@ -294,7 +294,16 @@ OCR 转文本、印章、发票、PDF 理解四条抓取通道都过它。
 - **「必须调工具」的守卫仍按原始指令判定**：改写后的指令里已经没有 URL，若用改写后的文本判定，
   `DOCUMENT_REFERENCE` 会失效，模型凭记忆编字段那条防线就没了。
 - **清理只有一个开关**：`agent.tools.delete-workspace-on-finish=true` 时整个任务目录（`src/`、`.ocr/`、
-  `.ingest/`）一起删；false 时一律不删。之前「false 也要删 `.ocr/`」的额外逻辑已去掉——测试环境要的就是
+  `.ingest/`、`.pdftmp/`）一起删；false 时一律不删。之前「false 也要删 `.ocr/`」的额外逻辑已去掉——测试环境要的就是
+
+- **并发调用之间按目录隔离**：栅格化的页图是共享沙箱里的临时产物，早先只带批号（`pg1-1.jpg`），而批号是
+  **每次调用内部**从 1 编号——模型一轮并发发多次 `understand_document` 时，两个「批 1」前缀相同，互相读到
+  并删掉对方在途的页图（实测 `NoSuchFileException`、`rasterized 0 of 2`，同任务 3 次调用有 2 次整批判死，
+  而任务状态是 completed、调用链里的 state 也是 success，只有 `PdfService` 的 WARN 能看出真相）。
+  现在每次调用独占一个目录：视觉通道 `<taskDir>/.pdftmp/pg<随机>/`、OCR 通道 `<taskDir>/.ocr/img-<随机>/`，
+  栅格化只列自己的目录、收尾连目录一起删；批与批之间在同一目录内按批号前缀分开。
+- **txt 产物先写临时再改名**：`.ocr/` 里那份按内容哈希命名的 txt，现在是先在自己的 `img-*` 目录里逐页写完，
+  整份完成后一次改名进 `.ocr/`。两个并发抽取点同一份内容时，直接写最终名会互相截断，复用方还可能读到半份文件。
   「跑完能进去看」，生产保持 true，否则每份扫描件在盘上留几十 MB 只涨不缩。
 
 ### 同步调用的 PDF 页窗口（`PageWindow`）
@@ -430,6 +439,8 @@ agent 用 `execute_shell_command` 直接调。目前只有 `ips`（Rust/musl sta
 - 对照视觉路径 `understand_document`：同一份 72 页扫描件 24 批 × 3 页、并发 2 → 126.0s。它一开始就把所有批
   提交进线程池（`PdfService.runBatches`），没有栅栏损耗——这正是当初「OCR 反而比视觉慢」的原因。
 - 中断语义保留：每批开头查线程中断；已提交但未完成的页与未提交的页都写 `notRunPage`，随后 `shutdownNow()`。
+- 并发调用的隔离：每次 `toTextFile` 在 `.ocr/` 下独占一个 `img-<随机>` 目录（页图 + 逐页追加的 txt），
+  写完改名进 `.ocr/`、目录随即删除；`.ocr/` 里最终只剩按内容哈希命名的 txt，复用判据不变。
 - 配置：`AGENT_PDF_OCR_PARALLELISM` 建议 6（生产原值 2）。页数 <= 2 仍强制串行（`PARALLEL_ABOVE_PAGES`）。
 
 ---

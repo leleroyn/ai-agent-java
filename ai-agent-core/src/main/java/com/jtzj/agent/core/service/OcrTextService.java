@@ -10,6 +10,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
@@ -41,6 +42,8 @@ import org.springframework.stereotype.Component;
  * （不过滤点开头目录），view_text_file 也不校验后缀，只校验路径在沙箱内。真正的隔离靠部署侧关掉
  * {@code agent.tools.read-file} 并把 shell 白名单收成 curl：模型没有读文件的入口。
  * 同一来源换一批字段再抽时直接复用那份 txt，不重新识别（不做内存缓存，去重只看文件在不在）。
+ * 每次调用的页图与逐页写入的 txt 先落在 {@code .ocr/img-*} 独占子目录里，整份写完才改名进 {@code .ocr/}，
+ * 目录随调用结束删掉；并发抽取之间因此互不可见（同名 txt 并发写会互相截断，页图会被对方删掉）。
  * 跑完只在 {@code agent.tools.delete-workspace-on-finish=true} 时随整个任务目录一起清掉；
  * 配成 false 时全部保留，便于事后排查。
 */
@@ -81,6 +84,7 @@ public class OcrTextService {
             return "Error: OCR 通道未启用（agent.ips.enabled=false 或未配 agent.ips.base-url），抽取无法进行。";
         }
         Path scratch = null;
+        Path imageDir = null;
         try {
             scratch = scratchDir(taskDir);
             SourceFiles.Fetched fetched = SourceFiles.fetch(source, taskDir);
@@ -94,29 +98,40 @@ public class OcrTextService {
             // 文件名带内容哈希：同一份内容不管被点名几次、换个什么路径，都只 OCR 一次。
             String hash = SourceFiles.sha256(file);
             String stem = baseName(source) + "-" + hash.substring(0, 12);
-            Path out = scratch.resolve(stem + ".txt");
-            Path partialOut = scratch.resolve(stem + PARTIAL_SUFFIX + ".txt");
-            if (Files.isRegularFile(out) && Files.size(out) > 0) {
+            Path dest = scratch.resolve(stem + ".txt");
+            Path destPartial = scratch.resolve(stem + PARTIAL_SUFFIX + ".txt");
+            if (Files.isRegularFile(dest) && Files.size(dest) > 0) {
                 log.info("reuse txt {} for source {} (same content, sha256={})",
-                        out, source, hash.substring(0, 12));
-                return SCRATCH_DIR + "/" + out.getFileName();
+                        dest, source, hash.substring(0, 12));
+                return SCRATCH_DIR + "/" + dest.getFileName();
             }
             // 上一次的残缺结果不复用：宁可重跑一遍 OCR，也不能让一页瞬时失败永久吃掉那几页的字段。
-            Files.deleteIfExists(partialOut);
+            Files.deleteIfExists(destPartial);
+            // 本次调用的页图与逐页追加的 txt 都写进独占目录，全部写完才改名进 .ocr/：并发两次抽取
+            // 点同一份内容时，既不会互删在途页图，也不会同时写同一个 txt（同名并发写会互相截断）。
+            imageDir = Files.createTempDirectory(scratch, "img-");
+            Path out = imageDir.resolve(stem + ".txt");
+            Path partialOut = imageDir.resolve(stem + PARTIAL_SUFFIX + ".txt");
             String error = isPdf(file)
-            ? ocrPdfPerPage(file, out, partialOut, source, scratch)
+            ? ocrPdfPerPage(file, out, partialOut, source, imageDir)
             : ocrWholeFile(file, out, source);
             if (error != null) {
                 return error;
             }
-            Path produced = Files.exists(out) ? out : partialOut;
-            if (!Files.exists(produced)) {
+            boolean full = Files.exists(out);
+            if (!full && !Files.exists(partialOut)) {
                 return "Error: OCR 已完成但没有产出文本。";
             }
-            return SCRATCH_DIR + "/" + produced.getFileName();
+            // 同目录改名等于一次 rename：复用方看到的就是完整文件，不会读到写了一半的 txt。
+            Path produced = full ? out : partialOut;
+            Path finalPath = full ? dest : destPartial;
+            Files.move(produced, finalPath, StandardCopyOption.REPLACE_EXISTING);
+            return SCRATCH_DIR + "/" + finalPath.getFileName();
         } catch (Exception e) {
             log.warn("ocr->txt failed for {}: {}", source, e.toString());
             return "Error: 转文本失败：" + e.getClass().getSimpleName() + ": " + e.getMessage();
+        } finally {
+            deleteTree(imageDir);
         }
     }
 
@@ -132,7 +147,7 @@ public class OcrTextService {
             return "Error: OCR 没有识别出任何文字（可能是纯图形或分辨率过低）。";
         }
         Files.writeString(out, text, StandardCharsets.UTF_8);
-        log.info("ocr->txt src={} bytes={} chars={} file={}", source, bytes.length, text.length(), out);
+        log.info("ocr->txt src={} bytes={} chars={} file={}", source, bytes.length, text.length(), out.getFileName());
         return null;
     }
 
@@ -147,7 +162,7 @@ public class OcrTextService {
      * 栅格化也不再卡在两批之间。
     */
     /** @return 失败原因；{@code null} 表示成功 */
-    private String ocrPdfPerPage(Path pdf, Path out, Path partialOut, String source, Path scratch)
+    private String ocrPdfPerPage(Path pdf, Path out, Path partialOut, String source, Path imageDir)
             throws Exception {
         int total = pdfService.pageCount(pdf);
         int maxPages = props.getPdfs().getMaxPages();
@@ -178,7 +193,7 @@ public class OcrTextService {
                 }
                 List<byte[]> pages;
                 try {
-                    pages = pdfService.renderPageImages(pdf, a, b, scratch);
+                    pages = pdfService.renderPageImages(pdf, a, b, imageDir);
                 } catch (Exception e) {
                     log.warn("rasterize pages {}-{} failed: {}", a, b, e.toString());
                     // 占位 future 保住「下标 = 页号-1」这个对应关系，写盘顺序才不会错位。
@@ -224,7 +239,7 @@ public class OcrTextService {
             if (exec != null) {
                 exec.shutdownNow();
             }
-            cleanPageImages(scratch);
+            cleanPageImages(imageDir);
         }
         if (ok == 0) {
             Files.deleteIfExists(out);
@@ -237,7 +252,7 @@ public class OcrTextService {
         }
         log.info("ocr->txt pdf src={} pages={}/{} failed={} chars={} parallel={} file={} elapsed={}ms",
         source, ok, limit, failed, chars, parallel,
-        failed.isEmpty() ? out : partialOut, System.currentTimeMillis() - started);
+        (failed.isEmpty() ? out : partialOut).getFileName(), System.currentTimeMillis() - started);
         return null;
     }
 
@@ -281,7 +296,7 @@ public class OcrTextService {
     }
 
 
-    /** pdftoppm 中途失败可能留下页图，统一清掉（正常路径 rasterizeBytes 读完即删）。 */
+    /** 清掉本次调用独占目录里的页图：正常路径 rasterizeBytes 读完即删，这里兜 pdftoppm 中途失败。 */
     private static void cleanPageImages(Path dir) {
         try (var stream = Files.list(dir)) {
             stream.filter(p -> {
@@ -296,6 +311,24 @@ public class OcrTextService {
             });
         } catch (Exception ignored) {
             // 列目录失败不影响结果
+        }
+    }
+
+    /** 独占临时目录是中间产物，用完连目录一起删；txt 已改名进 .ocr/，不受影响。 */
+    private static void deleteTree(Path dir) {
+        if (dir == null || !Files.isDirectory(dir)) {
+            return;
+        }
+        try (var stream = Files.walk(dir)) {
+            stream.sorted(Comparator.reverseOrder()).forEach(node -> {
+                try {
+                    Files.deleteIfExists(node);
+                } catch (Exception ignored) {
+                    // 删不掉也不影响结果
+                }
+            });
+        } catch (Exception ignored) {
+            // 同上
         }
     }
 

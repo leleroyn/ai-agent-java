@@ -12,7 +12,9 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Comparator;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -33,7 +35,7 @@ import org.springframework.stereotype.Component;
  * 而 OCR 文本稳定。
  *
  * <p>页面图像只发到 {@code agent.vision} 端点，主模型只拿文字。栅格化用 {@code pdftoppm}
- * （poppler-utils），产物写任务沙箱、用完即删；本地来源的源文件绝不删。
+ * （poppler-utils），产物写在本次调用独占的子目录里、用完连目录一起删；本地来源的源文件绝不删。
  */
 @Component
 public class PdfService {
@@ -41,6 +43,8 @@ public class PdfService {
     private static final Logger log = LoggerFactory.getLogger(PdfService.class);
     private static final Pattern PAGES = Pattern.compile("^Pages:\\s*(\\d+)", Pattern.MULTILINE);
     private static final Pattern TRAIL_NUM = Pattern.compile("-(\\d+)\\.[A-Za-z0-9]+$");
+    /** 栅格化页图的临时根目录（任务沙箱内），每次调用在其下独占一个子目录。 */
+    private static final String PAGE_TMP_DIR = ".pdftmp";
 
     private final AgentProperties props;
     private final VisionClient visionClient;
@@ -60,6 +64,7 @@ public class PdfService {
             return "Error: " + SourceFiles.URL_REJECTED;
         }
         Path pdf = null;
+        Path pageDir = null;
         try {
             pdf = resolveSource(pdfSource, taskDir);
             if (pdf == null) {
@@ -79,18 +84,22 @@ public class PdfService {
             List<String> parts = new ArrayList<>();
             List<String> failed = new ArrayList<>();
             int parallel = Math.min(Math.max(1, cfg.getUnderstandParallelism()), batches.size());
-            String[] answers = runBatches(pdf, batches, total, q, taskDir, parallel);
+            pageDir = newPageDir(taskDir, "pg");
+            String[] reasons = new String[batches.size()];
+            String[] answers = runBatches(pdf, batches, total, q, pageDir, parallel, reasons);
+            List<String> failedReasons = new ArrayList<>();
             for (int bi = 0; bi < batches.size(); bi++) {
                 int[] seg = batches.get(bi);
                 String out = answers[bi];
                 if (out == null) {
                     failed.add(seg[0] + "-" + seg[1]);
+                    failedReasons.add(reasons[bi]);
                     continue;
                 }
                 parts.add("【第 " + seg[0] + "-" + seg[1] + " 页】\n" + out);
             }
             if (parts.isEmpty()) {
-                return "Error: 这份 PDF 的 " + pages + " 页全部没能理解（栅格化或视觉模型失败）。";
+                return "Error: 这份 PDF 的 " + pages + " 页全部没能理解（" + describeReasons(failedReasons) + "）。";
             }
             String merged = QaMerge.merge(visionClient, parts, q);
             if (!failed.isEmpty()) {
@@ -103,7 +112,7 @@ public class PdfService {
             log.error("pdf understand failed src={}", pdfSource, e);
             return "Error: 处理 PDF 失败：" + e.getClass().getSimpleName() + ": " + e.getMessage();
         } finally {
-            cleanup(taskDir, null);
+            deleteTree(pageDir);
         }
     }
 
@@ -142,13 +151,16 @@ public class PdfService {
     /** 每批喂视觉模型的页数 = min(pdf.pages-per-call, vision.max-images)，至少 1。 */
     /**
      * 分批问视觉模型。批与批并发（{@code agent.pdfs.understand-parallelism}），但返回值按批序放回，
-     * 后面的归并因此与串行时完全一致；失败批返回 {@code null}，由调用方按序归入未覆盖页。
+     * 后面的归并因此与串行时完全一致；失败批返回 {@code null} 并把根因写进 {@code reasons}
+     * （下标 = 批序-1），由调用方按序归入未覆盖页。
      */
-    private String[] runBatches(Path pdf, List<int[]> batches, int total, String q, Path taskDir, int parallel) {
+    private String[] runBatches(Path pdf, List<int[]> batches, int total, String q, Path pageDir,
+                                int parallel, String[] reasons) {
         String[] answers = new String[batches.size()];
         if (parallel <= 1) {
             for (int bi = 0; bi < batches.size(); bi++) {
-                answers[bi] = askBatch(pdf, batches.get(bi), bi + 1, batches.size(), total, q, taskDir);
+                answers[bi] = askBatch(pdf, batches.get(bi), bi + 1, batches.size(), total, q,
+                        pageDir, reasons);
             }
             return answers;
         }
@@ -158,7 +170,8 @@ public class PdfService {
             for (int bi = 0; bi < batches.size(); bi++) {
                 final int idx = bi;
                 futures.add(exec.submit(() ->
-                        answers[idx] = askBatch(pdf, batches.get(idx), idx + 1, batches.size(), total, q, taskDir)));
+                        answers[idx] = askBatch(pdf, batches.get(idx), idx + 1, batches.size(), total, q,
+                                pageDir, reasons)));
             }
             for (Future<?> f : futures) {
                 try {
@@ -176,28 +189,35 @@ public class PdfService {
         return answers;
     }
 
-    /** 单批：栅格化 → 问视觉模型 → 删掉本批页图。失败返回 {@code null}。 */
-    private String askBatch(Path pdf, int[] seg, int batchNo, int batchCount, int total, String q, Path taskDir) {
+    /** 单批：栅格化 → 问视觉模型 → 删掉本批页图。失败返回 {@code null}，并把真实根因写进 {@code reasons}。 */
+    private String askBatch(Path pdf, int[] seg, int batchNo, int batchCount, int total, String q,
+                            Path pageDir, String[] reasons) {
         try {
-            List<String> urls = rasterize(pdf, seg[0], seg[1], batchNo, taskDir);
-            if (urls.size() != seg[1] - seg[0] + 1) {
+            List<String> urls = rasterize(pdf, seg[0], seg[1], batchNo, pageDir);
+            int want = seg[1] - seg[0] + 1;
+            if (urls.size() != want) {
+                reasons[batchNo - 1] = "栅格化只产出 " + urls.size() + "/" + want
+                        + " 页（pdftoppm 未生成全部页图）";
                 log.warn("pdf understand batch {}/{} pages={}-{} rasterized {} of {}",
-                        batchNo, batchCount, seg[0], seg[1], urls.size(), seg[1] - seg[0] + 1);
+                        batchNo, batchCount, seg[0], seg[1], urls.size(), want);
                 return null;
             }
             String out = visionClient.extractFromDataUrls(urls, buildQaPrompt(pagesOf(seg), total, q));
             if (out.startsWith("Error:")) {
+                reasons[batchNo - 1] = "视觉模型：" + out.substring("Error:".length()).trim();
                 log.warn("pdf understand batch {}/{} pages={}-{} failed: {}", batchNo, batchCount, seg[0], seg[1], out);
                 return null;
             }
             return out.trim();
         } catch (Exception e) {
+            String msg = e.getMessage() == null ? "" : ": " + snippet(e.getMessage());
+            reasons[batchNo - 1] = "栅格化失败：" + e.getClass().getSimpleName() + msg;
             log.warn("pdf understand batch {}/{} pages={}-{} error: {}",
                     batchNo, batchCount, seg[0], seg[1], e.toString());
             return null;
         } finally {
-            // 只删本批的页图（文件名前缀带批号），并发下不会碰到别的批。
-            cleanup(taskDir, null, "pg" + batchNo + "-");
+            // 页图目录是本次调用独占的，批与批之间靠批号前缀分开；并发调用之间已按目录隔离。
+            cleanup(pageDir, null, "pg" + batchNo + "-");
         }
     }
 
@@ -206,10 +226,10 @@ public class PdfService {
         return Math.max(1, k);
     }
 
-    /** 视觉通道栅格化：第 a-b 页 → JPEG data URL 列表。 */
-    private List<String> rasterize(Path pdf, int a, int b, int batchId, Path taskDir) throws Exception {
+    /** 视觉通道栅格化：第 a-b 页 → JPEG data URL 列表，页图落在本次调用独占的 {@code pageDir}。 */
+    private List<String> rasterize(Path pdf, int a, int b, int batchId, Path pageDir) throws Exception {
         AgentProperties.Pdfs cfg = props.getPdfs();
-        List<byte[]> images = rasterizeBytes(pdf, a, b, "pg" + batchId, taskDir,
+        List<byte[]> images = rasterizeBytes(pdf, a, b, "pg" + batchId, pageDir,
                 0, cfg.getMaxImageDimension(), cfg.getJpegQuality());
         List<String> urls = new ArrayList<>(images.size());
         for (byte[] img : images) {
@@ -220,22 +240,24 @@ public class PdfService {
 
     /**
      * OCR 通道用：把第 a-b 页栅格化成 JPEG 字节，按页码顺序返回。
+     * {@code pageDir} 必须是调用方本次调用独占的目录（并发调用之间按目录隔离）；
      * dpi/质量取 {@code agent.ips} 配置（OCR 需要比视觉更高的 dpi）。
      */
-    public List<byte[]> renderPageImages(Path pdf, int a, int b, Path taskDir) throws Exception {
+    public List<byte[]> renderPageImages(Path pdf, int a, int b, Path pageDir) throws Exception {
         AgentProperties.Ips ocr = props.getIps();
-        return rasterizeBytes(pdf, a, b, "ocrpg", taskDir,
+        return rasterizeBytes(pdf, a, b, "ocrpg", pageDir,
                 ocr.getRasterizeDpi(), ocr.getMaxImageDimension(), ocr.getJpegQuality());
     }
 
     /**
      * 用 {@code pdftoppm} 把第 a-b 页栅格化成 JPEG 字节（按页码排序，临时文件读完即删）。
+     * 临时图只写进 {@code pageDir}（本次调用独占）并只列这个目录，不去扫任务沙箱。
      * {@code dpi>0} 下发 {@code -r}（OCR 需要比视觉更高的 dpi）；{@code maxDim>0} 下发
      * {@code -scale-to}（控体积与 token）。
      */
-    private List<byte[]> rasterizeBytes(Path pdf, int a, int b, String stem, Path taskDir,
+    private List<byte[]> rasterizeBytes(Path pdf, int a, int b, String stem, Path pageDir,
                                         int dpi, int maxDim, int jpegQuality) throws Exception {
-        String prefix = taskDir.resolve(stem).toString();
+        String prefix = pageDir.resolve(stem).toString();
         List<String> cmd = new ArrayList<>(List.of("pdftoppm"));
         if (dpi > 0) {
             cmd.add("-r");
@@ -270,7 +292,7 @@ public class PdfService {
         }
         final String fileStem = stem + "-";
         List<Path> files = new ArrayList<>();
-        try (var stream = Files.list(taskDir)) {
+        try (var stream = Files.list(pageDir)) {
             stream.forEach(p -> {
                 String n = p.getFileName().toString();
                 if (n.startsWith(fileStem) && n.toLowerCase().endsWith(".jpg")) {
@@ -358,12 +380,46 @@ public class PdfService {
 
     // parseFields 统一用 Extraction.parseFields()
 
-    /** 清理临时页图；{@code alsoDelete} 非空则一并删该下载来的源文件（本地来源传 null 不删源文件）。 */
-    private void cleanup(Path taskDir, String alsoDelete) {
-        cleanup(taskDir, alsoDelete, "pg");
+    /**
+     * 每次调用独占的页图目录：{@code <任务目录>/.pdftmp/<唯一名>}。同一任务并发多次
+     * understand_document 各用各的目录，栅格化与清理互不可见。之前临时图只带批号，而批号是
+     * 每次调用内部从 1 编号，两次并发调用的批 1 前缀相同，会读到并删掉对方在途的页图
+     * （实测 NoSuchFileException、rasterized 0 of 2，整批判死）。
+     */
+    private static Path newPageDir(Path taskDir, String prefix) throws Exception {
+        Path parent = taskDir.resolve(PAGE_TMP_DIR);
+        Files.createDirectories(parent);
+        return Files.createTempDirectory(parent, prefix);
     }
 
-    /** {@code prefix} 决定删哪批页图：{@code pg} 全删，{@code pg3-} 只删第 3 批（带连字符，避免 pg1 误删 pg12）。 */
+    /** 页图目录是中间产物，用完连目录一起删；任务目录整体的清理开关不管这一步。 */
+    static void deleteTree(Path dir) {
+        if (dir == null || !Files.isDirectory(dir)) {
+            return;
+        }
+        try (var stream = Files.walk(dir)) {
+            stream.sorted(Comparator.reverseOrder()).forEach(file -> {
+                try {
+                    Files.deleteIfExists(file);
+                } catch (Exception ignored) {
+                    // 删不掉也不影响结果
+                }
+            });
+        } catch (Exception ignored) {
+            // 同上
+        }
+    }
+
+    /** 失败批次的真实根因，去重后拼成一句，替换掉栅格化或视觉模型失败这种猜测性汇总。 */
+    private static String describeReasons(List<String> reasons) {
+        Set<String> distinct = new LinkedHashSet<>();
+        for (String r : reasons) {
+            distinct.add(r == null || r.isBlank() ? "未知原因" : r);
+        }
+        return String.join("；", distinct);
+    }
+
+    /** {@code prefix} 决定删哪批页图：批号前缀带连字符（避免 pg1 误删 pg12）；目录本身已按调用独占。 */
     private void cleanup(Path taskDir, String alsoDelete, String prefix) {
         try {
             if (taskDir != null && Files.isDirectory(taskDir)) {
