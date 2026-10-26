@@ -786,8 +786,8 @@ public class AgentProperties {
     }
 
     /**
-     * 工具调用链（一趟任务里 agent 按顺序调用的工具序列）的采集参数。链落
-     * {@code agent_task.tool_trace}，并由 {@code GET /task/{id}} 的 {@code tools} 字段返回。
+     * 工具调用链（一趟任务里 agent 按顺序调用的工具序列）的采集参数。链落在
+     * {@code agent_tool_call} 子表里（一条调用一行），由 {@code GET /task/{id}} 的 {@code tools} 返回。
      */
     public static class Trace {
         /**

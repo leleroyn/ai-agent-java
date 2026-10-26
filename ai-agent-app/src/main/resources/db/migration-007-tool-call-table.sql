@@ -1,14 +1,13 @@
--- Migration 007: 工具调用链从 agent_task.tool_trace 挪到独立子表 agent_tool_call。
+-- Migration 007: 工具调用链改成独立子表 agent_tool_call，一条调用一行。
 --
--- 为什么换：调用链是「一趟任务 : 多次调用」的一对多。塞在一列 JSON 里，读要解析、查不动
+-- 为什么不用一列 JSON：调用链是「一趟任务 : 多次调用」的一对多。JSON 列读要解析、查不动
 -- （「这周哪些任务调过 ips seal」只能 LIKE），终态那条 UPDATE 还要顺带搬一整坨文本。
--- 一条调用一行之后，按工具查、按天统计、只看某一次重试，都是普通 SQL。
+-- 一行一次调用之后，按工具查、按天统计、只看某一次重试，都是普通 SQL。
 --
 -- 顺序有讲究：先建表，最后一句才删老列。客户端遇错即停，建好表就是最重要的结果。
--- 最后一句 DROP 只在跑过 migration-006 的库上成立（测试库执行过）；生产从没拿到 006，
--- 那句报 "Can't DROP 'tool_trace'" 属正常，忽略即可。
 --
--- 重复执行：CREATE TABLE IF NOT EXISTS 幂等；DROP 第二次报列不存在，忽略。
+-- 重复执行本文件：CREATE TABLE IF NOT EXISTS 幂等；最后那句 DROP 在没这一列的库上报
+-- "Can't DROP 'tool_trace'"，忽略即可——只有当年打过这版的测试库有这一列，生产从来没有。
 
 CREATE TABLE IF NOT EXISTS agent_tool_call (
     id           BIGINT       NOT NULL AUTO_INCREMENT,
@@ -27,5 +26,5 @@ CREATE TABLE IF NOT EXISTS agent_tool_call (
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci
   COMMENT = 'agent 工具调用链：一条调用一行，agent_task 的一对多子表。纯观测，不参与任务状态机';
 
--- 老列收尾：只有跑过 migration-006 的库需要（代码已不再读写它，留着只是占 agent_task 宽度）。
+-- 老列收尾：当年加过 tool_trace 那一列的库才需要（代码已不再读写它，留着只占 agent_task 宽度）。
 ALTER TABLE agent_task DROP COLUMN tool_trace;
