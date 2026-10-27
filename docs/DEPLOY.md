@@ -148,25 +148,6 @@ cp -r docs/examples/skills/report-format agent-skills/
 ```
 
 实测：拷入后 `GET /skills` 立即从 `["report-format"]` 变 `["legal-terms","report-format"]`；提交带 `"skills":["report-format"]` 的任务，输出里带上了技能规定的 `[REPORT-SPEC-v1]` 结尾标记。
-### AGENT_SKILLS_CODE_EXEC：203 上刻意开着 true
-
-这个开关决定 AgentScope 要不要往系统提示词里追加一段 `## Code Execution`。开着时那段模板里会把**技能工作目录的绝对路径重复五次**，而目录是 `/workspace/<taskId>/.skillwork`——带 taskId，于是系统提示词逐任务都不一样，跨任务的前缀缓存全部作废。四个内置识别技能只有 `SKILL.md`（没有 `scripts/`），本身不需要这段；`ips` CLI 用的 `execute_shell_command` 是 `AGENT_TOOL_SHELL` 给的，和这个开关无关。
-
-实测对比（同一个镜像 a6a3586，同一容器，各 10 条任务，生产 KIE 句式，不带 `skills` 字段）：
-
-| 类型 | code-exec=true | code-exec=false | 差 |
-|---|---|---|---|
-| 身份证（2 次调用） | 4476 | 4278 | −198 |
-| 控制组（1 次调用） | 3443 | 3286 | −157 |
-| 印章 | 4162 | 4179 | +17 |
-| 发票 | 4668 | 4687 | +19 |
-| 营业执照 | 4647 | 4698 | +51 |
-
-关掉确实省 token，但只省在**调用次数少**的任务上（那两个正好是没有技能正文的短链）；带技能正文的三条基本持平，波动来自 OCR 结果文本长度（同一任务重复两遍，`input_tokens` 只差 1–2，说明数字本身很稳，是工具返回在动）。
-
-代价是路由可靠性：关掉之后 12 条证件任务里 2 条**没有走技能**，直接调了 `extract_document_fields`（那两条是紧接三条完全相同的控制组任务之后提交的，共享前缀把上一条任务的工具选择带了出来）。开着的 10 条 10/10 正确：链首 `load_skill_through_path` → `execute_shell_command ips <子命令>`。
-
-结论：**203 保持 true**，仓库默认值仍是 false（`application.yml` 与 `.env.example`）。要关掉它，得先把路由做实——在系统提示词里直接写死 `身份证 → execute_shell_command ips idcard <文件>`，跳过 `load_skill_through_path`（顺带省掉技能正文约 1000 token 和一次往返），改完必须回归四个技能。
 
 脚本会：打印镜像 label → 重建同名容器 → **校验容器内 `AGENT_WORKING_DIR` 是绝对路径** → 等健康检查通过（失败自动 dump 日志）。
 
