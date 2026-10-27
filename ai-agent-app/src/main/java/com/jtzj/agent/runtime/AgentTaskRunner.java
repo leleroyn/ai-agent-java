@@ -231,9 +231,11 @@ public class AgentTaskRunner {
         log.warn("task {} used no tool for a document instruction; retrying once with a forced tool call", taskId);
         // 链不清空：重试那一趟的调用接在后面，一条链完整反映这次任务到底跑过什么。
         ReActAgent retry = newAgent(taskDir, skills, modelName, trace, left);
-        String nudged = prompt + "\n\n强制要求：本任务涉及的文件必须先通过工具读取（extract_document_fields / "
-                + "understand_document，或匹配技能规定的接口调用）。没有工具返回的内容时不得给出任何字段值，"
-                + "缺失字段一律写 null。";
+        String nudged = prompt + "\n\n强制要求：本任务涉及的文件必须先通过工具读取。指令命中 身份证 / 印章 / 发票 / "
+                + "营业执照的，第一个动作必须是 load_skill_through_path 加载对应技能（idcard-recognition / "
+                + "seal-recognition / invoice-recognition / bizlic-recognition），再执行技能正文规定的命令；"
+                + "只有不涉及这四类证件时，才用 extract_document_fields / understand_document。"
+                + "没有工具返回的内容时不得给出任何字段值，缺失字段一律写 null。";
         Msg second = await(taskId, call(retry, nudged, schema, freeFormFirst, ctx), left);
         if (second == null) {
             throw new AgentException(ErrorCodes.NO_RESULT, "agent returned no message", true);

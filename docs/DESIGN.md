@@ -236,7 +236,8 @@ AgentScope 2.0.3 自带 `io.agentscope.core.skill`，格式与 Claude/pi skills 
 
 **两级来源（低→高，后者同名覆盖前者）**：jar 内置（`classpath-location`，缺目录静默跳过）+ 运维目录（`agent.skills.directory`，只读，按 SKILL.md 的 mtime/size 快照，**改文件不需重启**）。
 
-**两种生效方式（关键取舍）**：请求带 `skills:[...]` → 服务端把技能正文直接注入任务提示、强制生效（点名=必须遵循，交模型自选是概率性的）；不带则只暴露 name/description，模型按需 `load_skill_through_path`。提交时校验技能名/数量/注入字符上限；未安装的技能名忽略并记 WARN（历史上是 400，会让还在传旧技能名的调用方直接失败）。
+**两种生效方式（关键取舍）**：请求带 `skills:[...]` → 服务端把技能正文直接注入任务提示、强制生效（点名=必须遵循，交模型自选是概率性的：实测同一条指令一次加载了技能、下一次整个跳过工具）；不带则只暴露 name/description，模型按需 `load_skill_through_path`。
+**四类证件不靠这两种，走第三层**：sys-prompt 里有一条无条件关键字路由（身份证→`idcard-recognition`、印章→`seal-recognition`、发票→`invoice-recognition`、营业执照→`bizlic-recognition`），命中即要求第一个动作是 `load_skill_through_path`，技能命令出结果前禁用两个通用文档工具。历史坑：这条规则原来挂着「（见匹配到的技能说明）」这个前提，等于**只有技能已被加载才生效**，而 resource-admin 的抽取任务 `skill_names` 全是 NULL、正文不进上下文，于是模型按「要字段值 → `extract_document_fields`」一步抽完，四类证件全走通用通道（2026-10-27 去掉前提后四类实测全中）。代价：四个技能名同时写在这里和技能目录里，改名必须两处同步。提交时校验技能名/数量/注入字符上限；未安装的技能名忽略并记 WARN（历史上是 400，会让还在传旧技能名的调用方直接失败）。
 
 **成本**：装了技能时即使请求不用，`<available_skills>` 元数据也会增加每次请求 input（实测 2 个技能约 +600 token；空目录不注入空块）。显式点名的技能正文另计。彻底关掉：`AGENT_SKILLS_ENABLED=false`。
 

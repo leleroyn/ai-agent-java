@@ -536,7 +536,12 @@ UPDATE agent_task SET callback_status='pending'
 这四项**不是内置工具**，而是随 jar 内置的技能 `seal-recognition` / `invoice-recognition` /
 `idcard-recognition` / `bizlic-recognition`，由模型用 `execute_shell_command` 调镜像里的
 `ips seal` / `ips invoice` / `ips idcard` / `ips bizlic`（打包与白名单见 DESIGN §12）。
-因此它们只在 `AGENT_TOOL_SHELL=true` 时可用；调用方要强制生效就在请求里带 `"skills":["seal-recognition"]`。
+因此它们只在 `AGENT_TOOL_SHELL=true` 时可用。调用方要强制生效就在请求里带 `"skills":["seal-recognition"]`
+（正文注入提示词，确定性最高）；**不带 `skills` 也走对**：sys-prompt 里有一条无条件关键字路由——指令出现
+身份证 / 印章 / 发票 / 营业执照 时，本趟第一个动作被强制为 `load_skill_through_path` 加载对应技能，
+技能正文的命令跑出结果之前 `extract_document_fields` / `understand_document` 禁用（历史坑见 DESIGN §9）。
+2026-10-27 在 203 实测四类各一条（都不带 `skills`）：链首全是 `load_skill_through_path` → `ips <子命令>`；
+非证件的 PDF 问答只调 `understand_document`、不加载技能。
 
 命令形态（来源只能是任务目录内的本地路径，文件已在 `src/` 下）：
 
