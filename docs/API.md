@@ -536,12 +536,16 @@ UPDATE agent_task SET callback_status='pending'
 这四项**不是内置工具**，而是随 jar 内置的技能 `seal-recognition` / `invoice-recognition` /
 `idcard-recognition` / `bizlic-recognition`，由模型用 `execute_shell_command` 调镜像里的
 `ips seal` / `ips invoice` / `ips idcard` / `ips bizlic`（打包与白名单见 DESIGN §12）。
-因此它们只在 `AGENT_TOOL_SHELL=true` 时可用。调用方要强制生效就在请求里带 `"skills":["seal-recognition"]`
-（正文注入提示词，确定性最高）；**不带 `skills` 也走对**：sys-prompt 里有一条无条件关键字路由——指令出现
-身份证 / 印章 / 发票 / 营业执照 时，本趟第一个动作被强制为 `load_skill_through_path` 加载对应技能，
-技能正文的命令跑出结果之前 `extract_document_fields` / `understand_document` 禁用（历史坑见 DESIGN §9）。
-2026-10-27 在 203 实测四类各一条（都不带 `skills`）：链首全是 `load_skill_through_path` → `ips <子命令>`；
-非证件的 PDF 问答只调 `understand_document`、不加载技能。
+因此它们只在 `AGENT_TOOL_SHELL=true` 时可用。路由在服务端做，**调用方不需要传 `skills`**：任务开跑前
+`SkillRouter` 扫指令关键字（身份证 / 印章·公章·盖章·红章·骑缝章 / 发票·增值税发票 / 营业执照，「发票专用章」
+不算发票），命中的技能正文直接注入本条任务消息，`<available_skills>` 也收窄到这一组，模型不再调
+`load_skill_through_path`。`skills` 字段仍然有效，语义是**并集**：你点名的排前面，关键字命中的追加在后面，
+两边都空则退回全量元数据 + 模型按需加载。多类命中就注入多份正文，且要求每一类各自跑出结论才允许收尾
+（缺类型会强制补一轮，见 DESIGN §9）；技能正文的命令跑出结果之前 `extract_document_fields` /
+`understand_document` 禁用（历史坑见 DESIGN §9）。
+2026-10-27 在 203 实测（都不带 `skills`）：四类单证任务的链首是 `execute_shell_command ips <子命令>`
+（比收口前少一趟 `load_skill_through_path`），身份证+营业执照混投一条任务跑出 `ips idcard` + `ips bizlic`
+两条命令、字段合并进同一个 JSON；非证件的 PDF 问答不注入任何技能正文，只调文档工具。
 
 命令形态（来源只能是任务目录内的本地路径，文件已在 `src/` 下）：
 
@@ -555,6 +559,9 @@ ips bizlic src/4-bizlic.jpg
 **哪些接口吃 PDF**：`seal` / `invoice` / `ocr` 支持图片和 PDF；`idcard` / `bizlic` **只收图片**
 （v3 路由里只有前三个做了 PDF 分支），传 PDF 会报错，技能正文里已让模型改走 `extract_document_fields`。
 
+**字段口径照技能正文的对照表**（正文注入后这条是确定性的，2026-10-27 实测）：`金额合计` 取 `发票金额`（不含税，\
+例：同一张票 `发票金额` 73906.88、`发票总金额`（价税合计）83514.77）。调用方要含税总额就把字段名写成\
+`价税合计` / `发票总金额`，要不含税就写 `金额合计`；两边的历史结果都出现过，差异是口径不是识别错误。\
 `ips seal` → stdout 是 JSON 数组，一个印章一个对象：`{confidence, ocr_result, seal_type, seal_image_base64}`。
 `ocr_result` 就是印章上的公司名称，`seal_type` 1=圆形红章、2=圆形灰章，`seal_image_base64` 恒为空串。
 空数组 `[]` 表示未检出印章，是权威结论而非错误。

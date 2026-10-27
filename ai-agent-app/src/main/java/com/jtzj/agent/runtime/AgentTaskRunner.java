@@ -21,8 +21,12 @@ import reactor.core.Exceptions;
 import reactor.core.publisher.Mono;
 
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.regex.Matcher;
 import java.util.concurrent.TimeoutException;
 import java.util.regex.Pattern;
 import com.jtzj.agent.core.error.AgentException;
@@ -51,6 +55,14 @@ public class AgentTaskRunner {
     private static final Pattern DOCUMENT_REFERENCE = Pattern.compile(
             "(?i)https?://\\S*\\.(?:pdf|jpe?g|png|webp|bmp|gif|txt|docx?|xlsx?|pptx?)(?![0-9A-Za-z])");
 
+    /** 指令里出现图片来源：证件通道（ips idcard / bizlic）必须跑，不能拿「PDF 不支持」当挡箭牌。 */
+    private static final Pattern IMAGE_SOURCE = Pattern.compile(
+            "(?i)\\S*\\.(?:jpe?g|png|webp|bmp|gif)(?![0-9A-Za-z])");
+
+    /** shell 链里跑过哪些 ips 子命令，用来数「命中几类、跑了几类」。 */
+    private static final Pattern IPS_SUBCOMMAND = Pattern.compile(
+            "\\bips\\s+(idcard|bizlic|invoice|seal)\\b");
+
     /** two_phase 第二阶段的地板超时：任务预算已耗尽时也给足这么多秒做转换（见 {@link #phaseTimeout}）。 */
     private static final long MIN_PHASE_TIMEOUT_SECONDS = 60;
 
@@ -60,6 +72,7 @@ public class AgentTaskRunner {
     private final TaskWorkspaceFactory workspaceFactory;
     private final SourceIngestor sourceIngestor;
     private final SkillRepositoryFactory skillRepositoryFactory;
+    private final SkillRouter skillRouter;
     private final StructuredOutputConverter structuredConverter;
     private final ObjectMapper mapper;
 
@@ -67,6 +80,7 @@ public class AgentTaskRunner {
                            ToolkitFactory toolkitFactory, TaskWorkspaceFactory workspaceFactory,
                            SourceIngestor sourceIngestor,
                            SkillRepositoryFactory skillRepositoryFactory,
+                           SkillRouter skillRouter,
                            StructuredOutputConverter structuredConverter,
                            ObjectMapper mapper) {
         this.props = props;
@@ -75,6 +89,7 @@ public class AgentTaskRunner {
         this.workspaceFactory = workspaceFactory;
         this.sourceIngestor = sourceIngestor;
         this.skillRepositoryFactory = skillRepositoryFactory;
+        this.skillRouter = skillRouter;
         this.structuredConverter = structuredConverter;
         this.mapper = mapper;
     }
@@ -96,7 +111,7 @@ public class AgentTaskRunner {
      * @param taskId      used to derive a per-task session id
      * @param instruction natural-language instruction
      * @param schema      caller JSON Schema, or null for free-text output
-     * @param skills      skill names to expose, or empty for every installed skill
+     * @param skills      调用方点名的技能；服务端再并上关键字命中的（见 SkillRouter），空 = 不点名
      * @param modelName   main-model profile to use (flash / pro); null/blank = default
      * @param budget      wall-clock limit including tool execution
      * @param sync        调用方是否在阻塞等结果；true 时长 PDF 在落盘时就裁成首尾各 5 页
@@ -136,7 +151,14 @@ public class AgentTaskRunner {
     private RunOutcome runInWorkspace(String taskId, String instruction, String rewritten,
                                       JsonNode schema, List<String> skills, Duration budget,
                                       String modelName, Path taskDir, ToolTrace trace) {
-        ReActAgent agent = newAgent(taskDir, skills, modelName, trace, budget);
+        // 服务端路由：命中哪几类证件在这里算，和调用方点名的取并集。技能正文直接注入本条任务消息，
+        // 模型不必自己去 load；命中多类就注入几份，一次到位（省往返的收益见 SkillRouter）。
+        List<String> routed = skillRouter.detect(rewritten);
+        List<String> effective = skillRouter.merge(skills, routed);
+        if (!routed.isEmpty()) {
+            log.debug("task {} skill route: hits={} requested={} injected={}", taskId, routed, skills, effective);
+        }
+        ReActAgent agent = newAgent(taskDir, effective, modelName, trace, budget);
         RuntimeContext ctx = RuntimeContext.builder()
                 .sessionId("task-" + taskId)
                 .userId("agent-service")
@@ -144,10 +166,11 @@ public class AgentTaskRunner {
 
         // Skills the caller named explicitly are injected here instead of being left to the
         // model's discretion; see SkillRepositoryFactory.inlineFor.
-        String skillBlock = skillRepositoryFactory.inlineFor(skills);
+        String skillBlock = skillRepositoryFactory.inlineFor(effective);
         String prompt = skillBlock.isEmpty()
                 ? rewritten
-                : "已加载的技能规范（必须严格遵循，不要再调用 load_skill_through_path 加载它们）：\n\n"
+                : "已加载的技能规范（命中几类就是几份，每一份都要照正文执行；正文已在本消息里，"
+                        + "不要再调 load_skill_through_path 加载同一个技能）：\n\n"
                         + skillBlock + "\n任务指令：\n" + rewritten;
 
         AgentProperties.StructuredOutputMode mode = props.resolveModel(modelName).getStructuredOutputMode();
@@ -163,16 +186,19 @@ public class AgentTaskRunner {
         if (reply == null) {
             throw new AgentException(ErrorCodes.NO_RESULT, "agent returned no message", true);
         }
-        if (ungroundedAnswer(instruction, trace)) {
-            reply = answerGroundedInTools(taskId, instruction, taskDir, skills, modelName, prompt, schema,
-                    freeFormFirst, ctx, trace, budget, startedAt);
+        if (needsToolNudge(instruction, trace, routed)) {
+            reply = answerGroundedInTools(taskId, instruction, taskDir, effective, routed, modelName,
+                    prompt, schema, freeFormFirst, ctx, trace, budget, startedAt);
             if (reply == null) {
                 throw new AgentException(ErrorCodes.NO_RESULT,
                         "document instruction answered without any tool call (guard disabled)", false);
             }
         }
 
-        String text = safeText(reply);
+        // 不带 outputSchema 时模型常把 JSON 包进 ```json 围栏（实测一批 6 条里 5 条如此），而 sys-prompt
+        // 明令不许用围栏。result_json 侧早有 stripCodeFence 兜底，result_text 也给同一个兜底：
+        // 整段就是一个围栏、里面正好是 JSON 才剥，围栏外写着说明文字的答复原样保留。
+        String text = stripJsonFence(safeText(reply));
         JsonNode result;
         if (mode == AgentProperties.StructuredOutputMode.TWO_PHASE && schema != null) {
             result = structuredConverter.toStructured(text, schema, modelName, phaseTimeout(budget, startedAt));
@@ -212,10 +238,13 @@ public class AgentTaskRunner {
      * with the tool requirement stated explicitly; if the model still will not read the file, fail
      * the task rather than return invented field values.
      *
+     * <p>第二个触发条件是「命中 N 类证件、链里却跑不满 N 条 ips 命令」。补完一轮仍缺类型时只记 WARN
+     * 不判失败：技能报「未检出」是权威终局，把它硬判成任务错误等于宣布「这张图里没有营业执照」是故障。
+     *
      * @return the retry reply, or {@code null} when the guard is switched off
      */
     private Msg answerGroundedInTools(String taskId, String instruction, Path taskDir, List<String> skills,
-                                      String modelName, String prompt, JsonNode schema,
+                                      List<String> routed, String modelName, String prompt, JsonNode schema,
                                       boolean freeFormFirst, RuntimeContext ctx,
                                       ToolTrace trace, Duration budget, long startedAt) {
         if (!props.getRunner().isForceDocumentTool()) {
@@ -228,17 +257,27 @@ public class AgentTaskRunner {
             throw new AgentException(ErrorCodes.NO_RESULT,
                     "document instruction answered without any tool call, and no budget left to retry", false);
         }
-        log.warn("task {} used no tool for a document instruction; retrying once with a forced tool call", taskId);
+        log.warn("task {} needs a forced tool call (tools so far: {}); retrying once", taskId, trace.tools());
         // 链不清空：重试那一趟的调用接在后面，一条链完整反映这次任务到底跑过什么。
         ReActAgent retry = newAgent(taskDir, skills, modelName, trace, left);
-        String nudged = prompt + "\n\n强制要求：本任务涉及的文件必须先通过工具读取。指令命中 身份证 / 印章 / 发票 / "
-                + "营业执照的，第一个动作必须是 load_skill_through_path 加载对应技能（idcard-recognition / "
-                + "seal-recognition / invoice-recognition / bizlic-recognition），再执行技能正文规定的命令；"
-                + "只有不涉及这四类证件时，才用 extract_document_fields / understand_document。"
-                + "没有工具返回的内容时不得给出任何字段值，缺失字段一律写 null。";
+        String commands = SkillRouter.commandsFor(routed);
+        String nudged = commands.isEmpty()
+                ? prompt + "\n\n强制要求：本任务涉及的文件必须先通过工具读取，禁止凭记忆给出字段值。"
+                        + "没有工具返回的内容时缺失字段一律写 null。"
+                : prompt + "\n\n强制要求：本任务命中 " + routed.size() + " 类证件，技能正文已在本消息开头给出，"
+                        + "不要再调 load_skill_through_path。每一类都必须各自跑出结论才允许收尾："
+                        + commands
+                        + "一条命令一个文件，多个文件逐条执行。全部命中类型的命令跑出结果之前，"
+                        + "禁止 extract_document_fields 与 understand_document；最后把各类字段合并进同一个 JSON 对象。"
+                        + "技能报「未检出」就是该类的终局结论，不得换通用工具再查；"
+                        + "没有工具返回的内容时不得给出任何字段值，缺失字段一律写 null。";
         Msg second = await(taskId, call(retry, nudged, schema, freeFormFirst, ctx), left);
         if (second == null) {
             throw new AgentException(ErrorCodes.NO_RESULT, "agent returned no message", true);
+        }
+        if (certChannelIncomplete(instruction, trace, routed)) {
+            log.warn("task {} still missing certificate channels after nudge: expected {}",
+                    taskId, SkillRouter.commandsFor(routed));
         }
         if (ungroundedAnswer(instruction, trace)) {
             throw new AgentException(ErrorCodes.NO_RESULT,
@@ -250,6 +289,68 @@ public class AgentTaskRunner {
 
     private static boolean ungroundedAnswer(String instruction, ToolTrace trace) {
         return trace.isEmpty() && DOCUMENT_REFERENCE.matcher(instruction).find();
+    }
+
+    /**
+     * 要不要强制重试：整趟一个工具都没调（老闸，答案只可能来自模型记忆），或者<b>命中了证件类型却没把
+     * 每一类都跑完</b>（新闸）。注入技能正文解决的是「知不知道要做」，这一条解决的是「做没做完」：
+     * 多证件任务里模型只跑一类就收尾，字段静默缺一半，生产上比慢几秒严重得多。
+     */
+    private static boolean needsToolNudge(String instruction, ToolTrace trace, List<String> routed) {
+        return ungroundedAnswer(instruction, trace) || certChannelIncomplete(instruction, trace, routed);
+    }
+
+    /**
+     * 命中的每一类是否都跑过自己的 {@code ips} 子命令。
+     *
+     * <p>两种情况不判（否则会误伤、白烧一轮）：调用链采集关闭时读不到命令参数；指令里只有 PDF 来源时，
+     * 只收图片的 idcard / bizlic 按技能正文改走通用抽取正是正确行为。
+     */
+    private static boolean certChannelIncomplete(String instruction, ToolTrace trace, List<String> routed) {
+        if (routed.isEmpty()) {
+            return false;
+        }
+        Set<String> ran = ipsSubcommands(trace);
+        if (ran == null) {
+            return false;
+        }
+        boolean image = IMAGE_SOURCE.matcher(instruction).find();
+        List<String> expected = new ArrayList<>(routed.size());
+        for (String skill : routed) {
+            String command = SkillRouter.subcommandOf(skill);
+            if (command == null || (!image && SkillRouter.imageOnly(skill))) {
+                continue;
+            }
+            expected.add(command);
+        }
+        if (expected.isEmpty() || ran.containsAll(expected)) {
+            return false;
+        }
+        // 一条 ips 都没跑、又没有图片来源：整条任务只有 PDF，通用抽取正是技能正文指示的路径。
+        return image || !ran.isEmpty();
+    }
+
+    /**
+     * 链里出现过的 {@code ips} 子命令。
+     *
+     * @return 采集关闭、读不到参数时返回 null，调用方据此放弃判定
+     */
+    private static Set<String> ipsSubcommands(ToolTrace trace) {
+        List<ToolCallRecord> records = trace.records();
+        if (records.isEmpty()) {
+            return trace.isEmpty() ? Set.of() : null;
+        }
+        Set<String> out = new LinkedHashSet<>();
+        for (ToolCallRecord record : records) {
+            if (record.args() == null) {
+                return null;
+            }
+            Matcher matcher = IPS_SUBCOMMAND.matcher(record.args());
+            while (matcher.find()) {
+                out.add(matcher.group(1));
+            }
+        }
+        return out;
     }
 
     private ReActAgent newAgent(Path taskDir, List<String> skills, String modelName,
@@ -378,6 +479,28 @@ public class AgentTaskRunner {
             log.debug("text fallback was not valid JSON");
             return null;
         }
+    }
+
+    /**
+     * 整段回复就是一个代码围栏、且围栏里是 JSON 时返回围栏内容，否则原样返回。
+     *
+     * <p>只认「整段就是围栏」：模型在围栏外面写解释文字时，那段文字是给人看的答复，剥掉围栏会改变
+     * result_text 的形状；纯围栏包装才是违反 sys-prompt 的那一类。
+     */
+    private String stripJsonFence(String text) {
+        if (text == null) {
+            return null;
+        }
+        String stripped = stripCodeFence(text).trim();
+        if (stripped.equals(text.trim()) || (!stripped.startsWith("{") && !stripped.startsWith("["))) {
+            return text;
+        }
+        try {
+            mapper.readTree(stripped);
+        } catch (Exception e) {
+            return text;
+        }
+        return stripped;
     }
 
     /** Remove a leading/trailing markdown code fence if the model wrapped its answer. */
