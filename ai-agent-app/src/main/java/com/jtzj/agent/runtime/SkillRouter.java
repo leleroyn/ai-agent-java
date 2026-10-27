@@ -78,7 +78,7 @@ public class SkillRouter {
         if (instruction == null || instruction.isBlank() || !skills.enabled()) {
             return List.of();
         }
-        String lower = instruction.toLowerCase(Locale.ROOT);
+        String lower = maskQualifiedFieldNames(instruction.toLowerCase(Locale.ROOT));
         // invoice 用抹掉专用章的文本判定，其余用原文。
         String forInvoice = lower.replaceAll("(发票|财务|合同|银行)专用章", "").replaceAll("发票章", "");
         Set<String> available = new LinkedHashSet<>(skills.availableNames());
@@ -102,6 +102,55 @@ public class SkillRouter {
             return hits.subList(0, cap);
         }
         return hits;
+    }
+
+    /**
+     * 「<b>受委托人</b>身份证号码」这类<b>限定式字段名</b>不算该证件的任务。
+     *
+     * <p>KIE 任务把要抽的字段直接写在指令末尾的冒号后面，字段名里的证件词是<b>文档里某个人的属性</b>，
+     * 不是卡面：授权委托书、登记表、协议里都写着「受委托人身份证号码」，来源就是那一页纸，
+     * {@code ips idcard} 对着它只会「未检出」，白烧一趟往返。生产 2026-10-27 实测：通用抽取先出了
+     * 正确的字段值，后面那条 {@code ips idcard}（缓存命中 90ms）纯属浪费。
+     *
+     * <p>判定口径：取指令<b>最后一个冒号</b>之后的字段清单，逐个字段名看证件关键字是否出现在
+     * <b>开头</b>——在开头就是卡面自己的字段（{@code 身份证号码}、{@code 印章名称}、{@code 发票号码}），
+     * 前面还挂着限定词就是「别人的身份证号」（{@code 受委托人身份证号码}），整名从扫描文本里抹掉。
+     * 关键字只要还在正文里或别的字段名开头出现，就照旧命中，所以「一项限定式字段名」不会让真证件任务
+     * 掉技能；只有「整条指令里这个类型仅以限定式字段名出现」才不路由——那正是通用抽取该干的活。
+     * 指令里没有字段清单冒号（或冒号后紧跟 {@code //}，那是 URL 的协议头）时不掩码，退回原行为。
+     */
+    private static String maskQualifiedFieldNames(String text) {
+        String fields = fieldListAfterLastColon(text);
+        if (fields.isEmpty()) {
+            return text;
+        }
+        String masked = text;
+        for (String field : fields.split("[,，、;；。\s]+")) {
+            for (Entry entry : TABLE) {
+                for (String keyword : entry.keywords()) {
+                    if (field.indexOf(keyword) > 0) {
+                        masked = masked.replace(field, "□".repeat(field.length()));
+                        break;
+                    }
+                }
+            }
+        }
+        return masked;
+    }
+
+    /** 字段清单 = 最后一个冒号之后的内容；跳过 {@code http://} 这类协议头里的冒号。 */
+    private static String fieldListAfterLastColon(String text) {
+        for (int i = text.length() - 1; i >= 0; i--) {
+            char colon = text.charAt(i);
+            if (colon != ':' && colon != '：') {
+                continue;
+            }
+            String rest = text.substring(i + 1);
+            if (!rest.startsWith("//")) {
+                return rest;
+            }
+        }
+        return "";
     }
 
     /**
