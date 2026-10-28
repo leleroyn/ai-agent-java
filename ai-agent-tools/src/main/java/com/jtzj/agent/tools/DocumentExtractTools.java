@@ -3,9 +3,11 @@ package com.jtzj.agent.tools;
 import com.jtzj.agent.core.config.AgentProperties;
 import com.jtzj.agent.core.service.OcrTextService;
 import com.jtzj.agent.core.service.TextService;
+import com.jtzj.agent.core.service.VisionClient;
 import com.jtzj.agent.core.support.CallLedger;
 import com.jtzj.agent.core.support.Extraction;
 import com.jtzj.agent.core.support.MediaInputs;
+import com.jtzj.agent.core.support.VisionFill;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -28,8 +30,9 @@ import org.slf4j.LoggerFactory;
  *
  * <p>图片与 PDF 先<b>OCR 换成文本</b>（同名 {@code .txt} 落在任务目录的 {@code .ocr/} 子目录，见
  * {@link OcrTextService}：图片一次 OCR，PDF 逐页识别后按页序追加），TXT 直接读，然后统一交给
- * {@link TextService} 按块抽取、确定性归并。只有一条通道、一套失败语义，没有页型探测、
- * 没有视觉/OCR 双通道回退。
+ * {@link TextService} 按块抽取、确定性归并。文本通道是主通道，没有页型探测；
+ * 图片来源若有字段没取到，再走一次 {@link VisionFill} 图像视觉复核<b>只补 null</b>
+ * （不覆盖文本通道已取到的值，PDF 与 TXT 不补）。
  *
  * <p><b>一次任务内同一份内容只 OCR 一次</b>：换一批字段再抽时，直接复用磁盘上已识别好的那份 txt
  * （实测模型常先抽 5 个字段、再补抽 1 个，不复用就会把 72 页重新识别一遍）。txt 不进主模型上下文——
@@ -56,14 +59,16 @@ public class DocumentExtractTools {
 
     private final OcrTextService ocrTextService;
     private final TextService textService;
+    private final VisionClient visionClient;
     private final AgentProperties props;
     private final ObjectMapper mapper;
     private final Path taskDir;
 
     public DocumentExtractTools(OcrTextService ocrTextService, TextService textService,
-    AgentProperties props, ObjectMapper mapper, Path taskDir) {
+    VisionClient visionClient, AgentProperties props, ObjectMapper mapper, Path taskDir) {
         this.ocrTextService = ocrTextService;
         this.textService = textService;
+        this.visionClient = visionClient;
         this.props = props;
         this.mapper = mapper;
         this.taskDir = taskDir;
@@ -78,6 +83,8 @@ public class DocumentExtractTools {
                   + "返回值就是权威结果：value=null 表示全文已完整遍历、并按语义匹配过别名仍未出现该字段，"
                   + "这就是终局结论——不得换个字段名再抽一遍，也不得改用 understand_document 补这个字段。"
                   + "抽取类任务调本工具一次就够了；同一来源超过抽取次数上限会被直接拒绝（不重跑）。"
+                  + "图片来源若有字段在文本通道没取到，本工具内部已经对这些字段做过一次图像视觉复核补漏"
+                  + "（补出的值来自图像，标 from=vision，units 为空）：你不需要、也不得自己再补一遍。"
                   + "本工具自带幂等：同一组（来源+字段）在一次任务里只真跑一次，重复调用直接返回上次结果（不重 OCR、不重跑模型）。"
                     + "返回 {status, total_units, results:[{field, value, units, alternates?}], extra?, failed_units}。"
                     + "units: 文本块序号（单个来源时）或来源序号（多个来源时）。",
@@ -178,8 +185,8 @@ public class DocumentExtractTools {
 
         // 2) 单来源：直接返回分块抽取结果（units=块号）
         if (refs.size() == 1 && usable == 1) {
-            String single = annotatePartial(
-                    textService.extractFields(txtOfRef.get(0), fieldsRaw, taskDir), partialRefs);
+            String single = visionFill(annotatePartial(
+                    textService.extractFields(txtOfRef.get(0), fieldsRaw, taskDir), partialRefs), refs);
             ledger.record(key, TOOL, single);
             return single;
         }
@@ -215,9 +222,35 @@ public class DocumentExtractTools {
                 .add(i + 1);
             }
         }
-        String merged = annotatePartial(buildResult(fields, acc, failedUnits, refs.size()), partialRefs);
+        String merged = visionFill(annotatePartial(
+                buildResult(fields, acc, failedUnits, refs.size()), partialRefs), refs);
         ledger.record(key, TOOL, merged);
         return merged;
+    }
+
+    /**
+     * 图片来源 + 文本通道没取全 → 交给 {@link VisionFill} 做一次图像视觉复核补漏。
+     *
+     * <p>闸门（任一命中就不补，直接返回原结果）：看图开关关掉；本次来源里没有图片
+     * （PDF/TXT 只有文本通道）；{@link VisionFill} 自己还要看 status 与有没有 null。
+     * PDF 不补是刻意的：图片是一两张图直接看像素，最便宜；PDF 要补漏得整份栅格化，
+     * 成本与「OCR 缺页导致的假阳性」都不划算。
+     */
+    private String visionFill(String json, List<String> refs) {
+        if (!props.getTools().isDocumentUnderstandVision()) {
+            return json;
+        }
+        List<String> images = new ArrayList<>();
+        for (String ref : refs) {
+            if (MediaInputs.IMAGE_EXTS.contains(MediaInputs.extension(ref))) {
+                images.add(ref);
+            }
+        }
+        if (images.isEmpty()) {
+            return json;
+        }
+        return VisionFill.fill(mapper, visionClient, props.getVision().getMaxImages(),
+                json, images, taskDir);
     }
 
     /**

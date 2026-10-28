@@ -501,7 +501,8 @@ UPDATE agent_task SET callback_status='pending'
 - 同一字段抽到多个不同值时**不会**摊成多条互斥结果：`value` 是权威值（非占位符优先 → 出现次数多优先 → 首次出现更早优先），其余候选放进 `alternates`，各带自己的 `units`。这样下游不必再猜哪条算数、也不必换工具自查。
 - 抽取器自己补出来的、未被请求的字段进 `extra`，不与 `results` 混在一起。
 - `status`：`complete`＝所有单元都成功；`partial`＝有单元失败，失败单元在 `failed_units`。**OCR 缺页也算 partial**（此时另有 `partial_note` 说明缺了哪些来源，且不再带 `null_note`）。
-- 抽取管线只有一条：图片/PDF 先 OCR 成文本（PDF 逐页识别、按页追加到 `.ocr/` 下的同名 `.txt`，每页前有 `--- 第 N 页 ---`），再按字符切块抽取。没有页型探测，也没有视觉/OCR 双通道回退。
+- **图片的 null 字段会自动做一次图像视觉复核**：文本通道（OCR → 分块 → 文本模型）没取到值、且本次来源里有图片时，工具内部把**原始图像**送一次视觉模型，**只填 null 槽位**，绝不覆盖文本通道已取到的值（视觉模型读长数字串不可靠，实测把 18 位统一社会信用代码读丢一位）。补出的值带 `"from":"vision"`、`units` 为空（证据在图像上，不在文本块里）；与文本通道不一致的视觉候选只进该字段的 `alternates`。返回值加 `vision_note` 写明这次补漏跑没跑、补出几个字段。补漏在**工具内部**完成，模型侧「调一次即终局、不得用 `understand_document` 补 null」的契约不变。`status=partial` 不补（OCR 缺页时对着整份图像补会出假阳性）；**PDF 与 TXT 不补**。图片按 `agent.vision.max-images` 分批，只在真有 null 时多花一次视觉调用，全字段命中的任务零额外开销。
+- 抽取的主通道只有一条：图片/PDF 先 OCR 成文本（PDF 逐页识别、按页追加到 `.ocr/` 下的同名 `.txt`，每页前有 `--- 第 N 页 ---`），再按字符切块抽取。没有页型探测；上面那次视觉复核**只补空、不推翻**，不是视觉/OCR 双通道回退。
 - OCR 原文只出现在任务目录的 `.ocr/` 子目录里：工具返回值不含该路径，全文也不常驻内存（按块读）。它在**整次任务内保留**，任务跑完由服务端删掉整个 `.ocr/`，原文不留盘。
 - 一次任务内同一份内容只 OCR 一次：txt 文件名带内容的 SHA-256 前缀，文件已存在就直接复用（**仅限完整产物**，见下一条）（模型先抽 5 个字段再补抽 1 个时不会把 72 页重新识别一遍）。按来源字符串去重做不到这点——模型自己 `curl -o` 出来的本地副本和原 URL 是两个 key。**没有内存缓存**：工具实例不保存全文或结果副本，几十 MB 的扫描件文本不压在堆上。
 - OCR 有页失败时不算「全文已遍历」：txt 里留一行 `--- 第 N 页 OCR 失败（该页内容缺失）---`，
@@ -527,7 +528,7 @@ UPDATE agent_task SET callback_status='pending'
 - 白名单只掐 shell，且只看每段的**可执行文件**、不看参数——`ips seal src/x.jpg > /tmp/o.txt` 的重定向目标不在管控内。
 - 白名单也管不到文件工具：`view_text_file`/`list_directory` 仍能读本任务目录内的文件（含 `.ocr/` 下的 OCR 全文），要一并断掉就设 `AGENT_TOOL_READ=false`。框架的权限规则只能按工具名 deny，做不到按路径。
 - OCR 文本通道**只用于字段抽取**。`understand_document` 对 PDF 始终走视觉，因为 OCR 文本会丢掉版面与图形信息。
-- **看图开关**：`agent.tools.document-understand-vision`（env `AGENT_TOOL_DOCUMENT_UNDERSTAND_VISION`，默认 `true`）。置 `false` 后 `understand_document` 不看图：图片/PDF 先 OCR 成文本（`.ocr/` 下同名 txt，与抽取共用同一份缓存），再交给 `agent.text-model` 问答，回答里逐来源标注「以下为 OCR 文本，看图功能未开启」。代价是丢掉版面与图形信息，「描述这张图」这类问题只能答图上印的字。`extract_document_fields` 本来就不看图，不受本开关影响。视觉端点没有开关（原 `agent.vision.enabled` 已删：端点不可达时工具直接返回 Error）。
+- **看图开关**：`agent.tools.document-understand-vision`（env `AGENT_TOOL_DOCUMENT_UNDERSTAND_VISION`，默认 `true`）。置 `false` 后 `understand_document` 不看图：图片/PDF 先 OCR 成文本（`.ocr/` 下同名 txt，与抽取共用同一份缓存），再交给 `agent.text-model` 问答，回答里逐来源标注「以下为 OCR 文本，看图功能未开启」。代价是丢掉版面与图形信息，「描述这张图」这类问题只能答图上印的字。`extract_document_fields` 的主通道（OCR 文本）不受本开关影响；它唯一的看图动作是图片 `value=null` 字段的视觉复核补漏，那一步受本开关控制（`false` = 不补漏）。视觉端点没有开关（原 `agent.vision.enabled` 已删：端点不可达时工具直接返回 Error）。
 - `understand_document` **不暴露页范围**：PDF 按 `min(agent.pdfs.pages-per-call, agent.vision.max-images)` 页一批，服务端遍历全部页、每批问同一个问题，再用 `agent.text-model` 把各批归并成**一段**回答（批与批并发，`agent.pdfs.understand-parallelism` 默认 2，归并仍严格按批序）；图片来源超过 `max-images` 同样自动分批。TXT 超过一个文本块也一样分批归并。失败批次会在回答末尾列出，不会静默丢页——早先"超过单次上限就返回一段文案让模型自己用 `page_range` 分批"的做法已删掉，它把遍历全文的责任推给了模型，实测模型会为一个问题连开 5 次不同页范围。全批失败时返回串里带**真实根因**（栅格化只产出 n/m 页、pdftoppm 的异常、视觉端点报错原文），不再是一句「栅格化或视觉模型失败」的猜测——调用方拿到的就是可判定的原因。
 - **文档类指令必须真的读文件**：指令里点名了文档文件（`http(s)` URL 带 pdf/jpg/png/txt/… 后缀）、但整趟运行一个工具都没调时，服务端会带「必须先调工具」的硬约束重试一次；仍不调工具就 `status=failed` + `error.code=NO_RESULT`，绝不把模型凭记忆编出来的字段值当结果返回。要退回「只告警不拦截」，设 `AGENT_FORCE_DOCUMENT_TOOL=false`。
 

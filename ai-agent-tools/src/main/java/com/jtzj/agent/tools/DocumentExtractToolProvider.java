@@ -17,7 +17,7 @@ public class DocumentExtractToolProvider implements AgentToolProvider {
     @Override
     public Object createTool(ToolContext context) {
         return new DocumentExtractTools(
-context.bean(OcrTextService.class), context.text(),
+context.bean(OcrTextService.class), context.text(), context.vision(),
 context.properties(), context.mapper(), context.taskDir());
     }
 }
