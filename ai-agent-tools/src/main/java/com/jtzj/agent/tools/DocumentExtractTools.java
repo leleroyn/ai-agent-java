@@ -31,8 +31,9 @@ import org.slf4j.LoggerFactory;
  * <p>图片与 PDF 先<b>OCR 换成文本</b>（同名 {@code .txt} 落在任务目录的 {@code .ocr/} 子目录，见
  * {@link OcrTextService}：图片一次 OCR，PDF 逐页识别后按页序追加），TXT 直接读，然后统一交给
  * {@link TextService} 按块抽取、确定性归并。文本通道是主通道，没有页型探测；
- * 图片来源若有字段没取到，再走一次 {@link VisionFill} 图像视觉复核<b>只补 null</b>
- * （不覆盖文本通道已取到的值，PDF 与 TXT 不补）。
+ * 图片来源若有字段没取到（{@code value=null}，也包括「未提及」这类占位文案——线上指令常写
+ * 「未提及填未提及」，只看 null 的话补漏闸永远不触发），再走一次 {@link VisionFill} 图像视觉
+ * 复核<b>只填空槽</b>，不覆盖文本通道已取到的真实值；PDF 与 TXT 不补。
  *
  * <p><b>一次任务内同一份内容只 OCR 一次</b>：换一批字段再抽时，直接复用磁盘上已识别好的那份 txt
  * （实测模型常先抽 5 个字段、再补抽 1 个，不复用就会把 72 页重新识别一遍）。txt 不进主模型上下文——
@@ -230,6 +231,8 @@ public class DocumentExtractTools {
 
     /**
      * 图片来源 + 文本通道没取全 → 交给 {@link VisionFill} 做一次图像视觉复核补漏。
+     *
+     * <p>「没取全」包括 {@code value=null} 和「未提及」这类占位文案（见 {@code VisionFill.MISSING_ANSWERS}）。
      *
      * <p>闸门（任一命中就不补，直接返回原结果）：看图开关关掉；本次来源里没有图片
      * （PDF/TXT 只有文本通道）；{@link VisionFill} 自己还要看 status 与有没有 null。

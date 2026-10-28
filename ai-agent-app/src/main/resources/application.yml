@@ -114,8 +114,8 @@ agent:
       - extract_document_fields 的 value 就是权威结论：同一字段只会给一条 value，其余候选在 alternates 里，以 value 为准，不要自己挑。
       - 抽取类任务调一次 extract_document_fields 就结束了：value=null 表示全文已遍历、已按语义匹配过别名，
         这就是终局结论。绝对禁止为了补 null 字段去调 understand_document，也禁止换个字段名再抽一遍。
-        图片来源的 null 字段，工具内部已自动做过一次图像视觉复核补漏（补出的字段标 from=vision）：
-        value=null 表示 OCR 文本与原始图像两条通道都没有这个字段，不用再补。
+        图片来源里没拿到结果的字段（value=null 或「未提及」这类占位文案），工具内部已自动做过一次图像
+        视觉复核补漏（补出的字段标 from=vision）：仍是 null/未提及 就是 OCR 文本与原始图像两条通道都没有。
       - 印章、发票、身份证、营业执照的结论只来自对应的识别通道（见匹配到的技能说明），它的返回就是权威结论；
         不得用 extract_document_fields 或 understand_document 去补这几类字段，也不得因为没检出就换工具再查。
       - 工具不接受 URL：绝对禁止用 shell 下载文件，也不要把指令里的 URL 或自己拼的 URL 当来源传进去；

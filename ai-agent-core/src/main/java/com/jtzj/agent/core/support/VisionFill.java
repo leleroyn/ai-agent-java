@@ -9,7 +9,9 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -21,7 +23,7 @@ import org.slf4j.LoggerFactory;
  * understand_document 补 null 字段」（sys-prompt 硬约束）。补漏放进工具里，模型行为零变化，
  * 也不会开出「模型自己去调理解工具补字段」那条重试循环——那正是当初禁掉它的原因。
  *
- * <p><b>单向补 null，绝不覆盖文本通道已取到的值</b>：视觉模型读长数字串不可靠（实测把 18 位
+ * <p><b>只填空槽（{@code value=null} 与「未提及」这类占位文案），绝不覆盖文本通道已取到的真实值</b>：视觉模型读长数字串不可靠（实测把 18 位
  * 统一社会信用代码读丢一位，commit 5e52db4 当初正是为此删掉抽取的视觉/OCR 双通道回退）。
  * 所以文本通道有值就以它为准，视觉的冲突候选只进该字段的 {@code alternates}；补出的值标
  * {@code from=vision}，{@code units} 留空（证据在图像上，不在文本块里）。
@@ -36,7 +38,27 @@ public final class VisionFill {
 
     private static final Logger log = LoggerFactory.getLogger(VisionFill.class);
 
+    /**
+     * 「文本通道没拿到结果」的说法集合。线上指令普遍写着「未提及填未提及」，抽取子模型于是把缺失
+     * 字段答成这些占位文案而不是 JSON null——只认 null 的话补漏闸永远不触发（实测一张图 5 个字段里
+     * 3 个是「未提及」，视觉复核一次没跑）。所以这些值同样算空槽，可以被视觉结果顶掉。
+     * {@link Extraction} 的占位符表不动：那是归并排序共用的口径，改它会波及 PDF/TXT 的既有结论。
+     */
+    private static final Set<String> MISSING_ANSWERS = Set.of(
+            "未提及", "未识别", "未检出", "未检测到", "未找到", "未发现", "未见", "未出现",
+            "未列明", "未标注", "未填写", "未获取", "未获取到", "不详", "无", "暂无", "未知",
+            "待定", "不适用", "空", "n/a", "na", "null", "none", "--", "-");
+
     private VisionFill() {
+    }
+
+    /** 该字段的值算不算「没拿到结果」：JSON null、空串，或 {@link #MISSING_ANSWERS} 里的占位文案。 */
+    private static boolean missing(JsonNode value) {
+        if (value.isMissingNode() || value.isNull()) {
+            return true;
+        }
+        String text = value.asText().trim();
+        return text.isEmpty() || MISSING_ANSWERS.contains(text.toLowerCase(Locale.ROOT));
     }
 
     /** 一次视觉复核的产出：字段 -&gt; 值（只留非空）、没跑成的批、真正跑成的批数。 */
@@ -44,7 +66,8 @@ public final class VisionFill {
     }
 
     /**
-     * 对抽取结果补漏。任何一步不满足条件就原样返回入参 json，不改动结论。
+     * 对抽取结果补漏：文本通道留下的空槽（null 或「未提及」）交给视觉模型填空，真实值一律不动。
+     * 任何一步不满足条件就原样返回入参 json，不改动结论。
      *
      * @param maxImages {@code agent.vision.max-images}，单批图数上限
      * @param imageRefs 本次抽取里的图片来源（PDF/TXT 不在里面：它们走文本通道，不补）
@@ -74,7 +97,8 @@ public final class VisionFill {
                 StringBuilder note = new StringBuilder("已对图像做视觉复核（")
                         .append(pass.batches()).append(" 批 / 共 ").append(imageRefs.size())
                         .append(" 张图）：补出 ").append(filled)
-                        .append(" 个原为 null 的字段，这些值来自图像、标 from=vision 且 units 为空；")
+                        .append(" 个原本没拿到结果的字段（value=null 或「未提及」这类占位文案），这些值来自图像、")
+                        .append("标 from=vision 且 units 为空；")
                         .append("文本通道已取到的值一律未被覆盖，视觉的冲突候选只进该字段的 alternates（")
                         .append(conflicts).append(" 条）。");
                 if (!pass.failures().isEmpty()) {
@@ -82,7 +106,7 @@ public final class VisionFill {
                 }
                 root.put("vision_note", note.toString());
                 if (remaining > 0) {
-                    root.put("null_note", "value=null 表示 OCR 文本通道已遍历全文全部文本块、并按语义匹配过别名，"
+                    root.put("null_note", "value=null（含「未提及」这类占位文案）表示 OCR 文本通道已遍历全文全部文本块、并按语义匹配过别名，"
                             + "图像视觉复核也已看过原始图像，两条通道都没出现该字段，"
                             + "这就是终局结论：不要再抽取、不要换字段名重试、不要用 understand_document 补这个字段。");
                 }
@@ -112,8 +136,7 @@ public final class VisionFill {
         }
         List<String> fields = new ArrayList<>();
         for (JsonNode r : results) {
-            JsonNode value = r.path("value");
-            if (value.isMissingNode() || value.isNull()) {
+            if (missing(r.path("value"))) {
                 String field = textOrNull(r.path("field"));
                 if (field != null && !field.isBlank()) {
                     fields.add(field.trim());
@@ -153,7 +176,12 @@ public final class VisionFill {
                         || hit.value() == null || hit.value().isBlank()) {
                     continue;
                 }
-                values.putIfAbsent(hit.field().trim(), hit.value().trim());
+                String answer = hit.value().trim();
+                // 视觉也说「未提及」不算补到：进了 values 会把空槽当成已答。
+                if (MISSING_ANSWERS.contains(answer.toLowerCase(Locale.ROOT))) {
+                    continue;
+                }
+                values.putIfAbsent(hit.field().trim(), answer);
             }
         }
         return new Pass(values, failures, batches);
@@ -176,7 +204,7 @@ public final class VisionFill {
             }
             JsonNode current = r.path("value");
             String candidate = values.get(field.trim());
-            if (current.isMissingNode() || current.isNull()) {
+            if (missing(current)) {
                 if (candidate != null) {
                     r.put("value", candidate);
                     r.put("from", "vision");
