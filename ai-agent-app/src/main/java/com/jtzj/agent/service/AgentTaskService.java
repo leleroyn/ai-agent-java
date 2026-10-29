@@ -143,8 +143,8 @@ public class AgentTaskService {
                     "queue depth exceeds agent.execution.max-queued-tasks (" + cap + ")", true);
         }
 
-        log.info("task {} queued, budgetSeconds={} hasSchema={} skills={}",
-                taskId, budget.toSeconds(), schema != null,
+        log.info("task {} queued, budgetSeconds={} sync={} hasSchema={} skills={}",
+                taskId, budget.toSeconds(), request.syncRequested(), schema != null,
                 skills.isEmpty() ? "(all)" : skills);
         // 行已提交，立刻叫醒 parked 的 worker：入队到开跑的延迟不再取决于轮询间隔。
         poller.signalWorkQueued();
@@ -296,11 +296,26 @@ public class AgentTaskService {
         return UUID.randomUUID().toString().replace("-", "");
     }
 
-    /** Per-request timeout, clamped to the configured ceiling. */
+    /**
+     * Per-task wall-clock budget.
+     *
+     * <p><b>异步任务忽略 {@code options.timeoutSeconds}</b>：这个值是给同步语义用的——调用方正阻塞在
+     * HTTP 里，它写多少就是它愿意等多久。异步提交立刻返回，把它当执行预算等于让调用方自己给任务
+     * 判死刑（现网调用方固定传 300，长文档任务必死在 5 分钟）。异步的过期时间只由
+     * {@code agent.execution.max-timeout-seconds}（AGENT_MAX_TIMEOUT）决定，运维调这一个数就够，
+     * 调用方传什么都不影响。
+     *
+     * <p>同步任务保持原样：请求值夹到上限（服务端不能比阻塞的调用方愿意等的更久），没传用
+     * {@code default-timeout-seconds}。
+     */
     private Duration resolveBudget(AgentTaskRequest request) {
-        int configured = props.getExecution().getDefaultTimeoutSeconds();
         int ceiling = props.getExecution().getMaxTimeoutSeconds();
         Integer requested = request.options() == null ? null : request.options().timeoutSeconds();
+        if (!request.syncRequested()) {
+            // 这里忽略 requested：queued 日志已带 sync=，运维要看的是 budgetSeconds 是否等于 max-timeout-seconds。
+            return Duration.ofSeconds(Math.max(1, ceiling));
+        }
+        int configured = props.getExecution().getDefaultTimeoutSeconds();
         int seconds = requested == null || requested <= 0 ? configured : Math.min(requested, ceiling);
         return Duration.ofSeconds(Math.max(1, seconds));
     }

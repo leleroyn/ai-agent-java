@@ -90,7 +90,7 @@ accepted ────────────────► running ───�
 | `skills` | string[] | 否 | 指定启用的技能名（见 `GET /skills`，大小写敏感）。不提供＝所有已安装技能可见；提供则这些技能正文被直接注入并强制生效。未安装的名字被忽略并记 WARN（不报错）。≤ 8 个 |
 | `model` | string | 否 | 主模型 profile（`flash` / `pro`，具体端点由部署配置）。不提供＝用默认（`agent.default-model`，当前 `flash`）；填未知 profile 名返回 `code=1001`，不静默回落。 |
 | `options.sync` | boolean | 否 | true＝阻塞等到终态；false（默认）＝立即返回，由调用方轮询。true 时 PDF 来源只取首尾各 5 页（见 DESIGN §11） |
-| `options.timeoutSeconds` | int | 否 | 执行预算，默认 120，上限 900。**从 worker 领取任务时开始计时，不含排队** |
+| `options.timeoutSeconds` | int | 否 | **只对 `sync=true` 生效**：本次阻塞调用愿意等的秒数，缺省 120，夹到上限。**异步（`sync=false` 或省略）忽略本值**，执行预算＝`agent.execution.max-timeout-seconds`（`AGENT_MAX_TIMEOUT`），调用方传什么都一样。计时从 worker 领取任务开始，不含排队 |
 | `metadata` | object | 否 | 业务上下文，服务端不解释，会**原样回显**（含嵌套结构）于所有响应。≤ 8192 字符 |
 | `callbackUrl` | string | 否 | 任务终态后服务端 POST JSON 到该地址。必须以 `http://` 或 `https://` 开头，≤ 1024 字符。投递结果记录在数据库 `callback_status` 列（见 §3A） |
 
@@ -112,10 +112,10 @@ curl -X POST http://localhost:8080/api/v1/agent/task \
     "properties": { "name": { "type": "string" }, "age": { "type": "integer" } },
     "required": ["name", "age"]
   },
-  "metadata": { "orderId": "A20260917" },
-  "options": { "timeoutSeconds": 120 }
+  "metadata": { "orderId": "A20260917" }
 }
 ```
+<!-- 异步提交不发 options.timeoutSeconds：服务端忽略它，异步预算＝AGENT_MAX_TIMEOUT -->
 
 响应（HTTP 200）：
 
@@ -651,10 +651,10 @@ ocr_text, corp_image_base64}`。`ocr_text` 同样是 JSON 字符串，要再解�
 ```bash
 BASE=http://localhost:8080/api/v1/agent
 
-# 1) 提交
+# 1) 提交（异步：不传 options.timeoutSeconds，服务端忽略它，预算＝AGENT_MAX_TIMEOUT）
 RESP=$(curl -s -X POST $BASE/task \
   -H 'Content-Type: application/json; charset=utf-8' \
-  -d '{"instruction":"统计当前目录 .txt 文件数量，只回答数字","options":{"timeoutSeconds":180}}')
+  -d '{"instruction":"统计当前目录 .txt 文件数量，只回答数字"}')
 
 CODE=$(echo "$RESP" | grep -oE '"code":[0-9]+' | head -1 | cut -d: -f2)
 [ "$CODE" != "0" ] && { echo "提交失败: $RESP"; exit 1; }
@@ -687,8 +687,8 @@ done
 | outputSchema 最大 | 8192 字符 | `AGENT_LIMIT_SCHEMA` |
 | two_phase 第二阶段输出预算 | flash 8192 / pro 131072 | `AGENT_FLASH_STRUCTURED_MAX_TOKENS` / `AGENT_PRO_STRUCTURED_MAX_TOKENS` |
 | metadata 最大 | 8192 字符 | `AGENT_LIMIT_METADATA` |
-| 默认超时 | 120 秒 | `AGENT_DEFAULT_TIMEOUT` |
-| 最大超时 | 900 秒 | `AGENT_MAX_TIMEOUT` |
+| 同步默认超时 | 120 秒 | `AGENT_DEFAULT_TIMEOUT` |
+| 异步执行预算 / 同步超时的上限 | 900 秒 | `AGENT_MAX_TIMEOUT`（**异步任务的过期只看这一个数**） |
 | 并发上限（异步 / 同步） | 1 / 1 | `AGENT_ASYNC_CONCURRENCY` / `AGENT_SYNC_CONCURRENCY` |
 | 队列积压上限（超过返 3001） | 1000 | `AGENT_MAX_QUEUED_TASKS` |
 | 任务领取租约 | 90 秒 | `AGENT_LEASE_SECONDS` |
@@ -706,7 +706,7 @@ done
 ## 11. 使用注意
 
 1. **判断任务成败只看 `data.status`**，`code` 只表示这次调用本身成功与否。
-2. **超时不含排队**：`timeoutSeconds` 从 worker 领取任务时开始计时。排队时长看 `startedAt - createdAt`，`durationMs` 是纯执行耗时。高积压下任务总耗时可能远超 `timeoutSeconds`；`sync=true` 的等待从提交时刻算，会把排队也算进去。因此 `sync=true` 的任务在队列里会被**优先认领**，不会被前面的大批量任务压住；但它前面若已有任务在跑，仍要等该任务结束（单 worker 时尤其明显）。
+2. **超时不含排队**：`timeoutSeconds`（同步）从 worker 领取任务时开始计时；异步任务的预算＝`AGENT_MAX_TIMEOUT`，请求里的 `timeoutSeconds` 被忽略（异步提交立刻返回，那个值只是同步语义下调用方愿意等的时长，让调用方给长任务判死没道理）。排队时长看 `startedAt - createdAt`，`durationMs` 是纯执行耗时。高积压下任务总耗时可能远超 `timeoutSeconds`；`sync=true` 的等待从提交时刻算，会把排队也算进去。因此 `sync=true` 的任务在队列里会被**优先认领**，不会被前面的大批量任务压住；但它前面若已有任务在跑，仍要等该任务结束（单 worker 时尤其明显）。
 3. **重试提交是安全的**：同一 `taskId` 重发不会重复执行，而是返回该任务的当前状态或已有结果，`code` 仍为 0。
 4. **`error.retryable=true` 才值得重试任务**（例如 `AGENT_TIMEOUT`、`AGENT_INTERRUPTED`），用同一个 `taskId` 重发即可。
 5. **进程重启不丢任务**：排队中的任务会被重新领取；执行中的任务在租约过期（默认 90 秒）后自动重跑，最多 `max-attempts` 次，超过则置 `failed` + `AGENT_LEASE_EXPIRED`。副作用：有外部写操作的任务可能被执行多次。

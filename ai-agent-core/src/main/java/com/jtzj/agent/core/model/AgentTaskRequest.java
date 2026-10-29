@@ -36,8 +36,10 @@ public record AgentTaskRequest(
 
     /**
      * @param sync           when true the HTTP call blocks until the task settles
-     * @param timeoutSeconds wall-clock budget including queue wait; clamped to
-     *                       {@code agent.execution.max-timeout-seconds}
+     * @param timeoutSeconds 只作用于 {@code sync=true}：本次阻塞调用愿意等的秒数，夹到
+     *                       {@code agent.execution.max-timeout-seconds}。异步（{@code sync=false}
+     *                       或省略）<b>忽略本值</b>，执行预算取 max-timeout-seconds，见
+     *                       {@code AgentTaskService.resolveBudget}
      */
     public record Options(Boolean sync, Integer timeoutSeconds) {
     }
