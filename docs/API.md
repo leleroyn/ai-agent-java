@@ -524,7 +524,7 @@ UPDATE agent_task SET callback_status='pending'
 - 藏进子目录本身拦不住模型（`list_directory` 不过滤点开头目录，`view_text_file` 也不校验后缀），所以隔离靠不注册读文件的工具，见下一条。
 - 想彻底断掉「模型换工具自查」，就把内置文件工具关掉：`AGENT_TOOL_READ=false`（同时去掉 `view_text_file` 和 `list_directory`）、必要时 `AGENT_TOOL_SHELL=false`。框架的权限规则只能按工具名 deny，做不到按路径，所以路径级隔离只能靠不注册工具。
 - **不需要 §6.2 那几项识别时，shell 直接关（`AGENT_TOOL_SHELL=false`）**：框架的 shell 工具不截断输出，模型把一个大文件打到 stdout 会整篇灌进主模型上下文（实测 30MB PDF ≈ 13.7 万字符二进制），任务随即空转到 max-iters 无结果。
-- **要保留 §6.2 的识别能力时，用逐段白名单收紧而不是关掉**：`AGENT_SHELL_ALLOWED=ips`。校验按 `; | & 换行` 拆段，每段首个可执行文件都必须在白名单里，所以管道仍可用（`ips seal src/x.jpg | head -c 500` 会因为 `head` 不在名单而被拒，不是因为含管道）。这样 `cat`/`grep`/`head`/`python` 全都跑不了，shell 读不到本地文件内容。黑名单 `AGENT_SHELL_DENIED` 同样逐段判，条目可以是裸名（`curl`，命中 `/usr/bin/curl`）或路径后缀（`native/ips`，命中绝对路径直调未包装的二进制），默认已含 `curl,wget,/opt/agent-cli/native/ips`。
+- **要保留 §6.2 的识别能力时，用逐段白名单收紧而不是关掉**：`AGENT_SHELL_ALLOWED=ips`。校验按 `; | & 换行` 拆段，每段首个可执行文件都必须在白名单里，所以管道仍可用（`ips seal src/x.jpg | head -c 500` 会因为 `head` 不在名单而被拒，不是因为含管道）。这样 `cat`/`grep`/`head`/`python` 全都跑不了，shell 读不到本地文件内容——身份证技能要用 §6.2 那条 `python3` 模板，就得写 `AGENT_SHELL_ALLOWED=ips,python3`；只写 `ips` 时技能正文自带退化跑法（去掉管道裸跑 `ips`，直接读 `ocr_text`）。黑名单 `AGENT_SHELL_DENIED` 同样逐段判，条目可以是裸名（`curl`，命中 `/usr/bin/curl`）或路径后缀（`native/ips`，命中绝对路径直调未包装的二进制），默认已含 `curl,wget,/opt/agent-cli/native/ips`。
 - 白名单只掐 shell，且只看每段的**可执行文件**、不看参数——`ips seal src/x.jpg > /tmp/o.txt` 的重定向目标不在管控内。
 - 白名单也管不到文件工具：`view_text_file`/`list_directory` 仍能读本任务目录内的文件（含 `.ocr/` 下的 OCR 全文），要一并断掉就设 `AGENT_TOOL_READ=false`。框架的权限规则只能按工具名 deny，做不到按路径。
 - OCR 文本通道**只用于字段抽取**。`understand_document` 对 PDF 始终走视觉，因为 OCR 文本会丢掉版面与图形信息。
@@ -566,6 +566,16 @@ ocr_text, corp_image_base64}`。`ocr_text` 同样是 JSON 字符串，要再解�
 `idcard_type` 与 `bizlic_type` 都恒为 1（检测模型不区分正反面/版本，只是证件类别）；`corp_image_base64` 恒为 null
 （CLI 固定 `return_corp_image=false`）。这两个接口没检出时不返回空数组，而是抛 400（见下面「不是发票」那条，
 文案分别是「未检测到有效身份证.」「未检测到有效营业执照.」），同样是终局结论。
+
+`idcard-recognition` 的技能正文给了一条**固定模板**，模型只填文件路径，不自己写解析：
+
+```
+ips idcard src/3-idcard.jpg | python3 -c "print(__import__('json').loads(__import__('sys').stdin.read().strip() or '[{}]')[0].get('ocr_text') or 'not_detected')"
+```
+
+第二段 `python3` 解开 `ocr_text` 那层 JSON 字符串，stdout 直接是一行字段对象；未检出时打印 `not_detected`。
+为什么固定：模型自己写解析就得把上一条命令的 JSON 原文粘进源码，4 层转义（bash 双引号 / 字符串字面量 / JSON / 接口原文）实测会炸，长住址与 18 位号码还会漏抄，那几百字符也全算进生成量。
+按 §6.1 的逐段白名单，这条要求 `AGENT_SHELL_ALLOWED` 含 `python3`；只写 `ips` 时模型收到 `SecurityError`，技能正文里已写好退化跑法：去掉管道裸跑 `ips idcard src/...`，直接读 `ocr_text` 字符串，不再为解析起 shell。
 
 超时：CLI `1.0.5` 起自带 `--timeout` 默认 **180s**，多页 PDF 的印章/发票检测够用。包装脚本只在运维显式设了
 `IPS_TIMEOUT_SECONDS` 时才追加 `--timeout`（`scripts/docker-run.sh` 按 shell > `.env` 同名键 > 默认解析，

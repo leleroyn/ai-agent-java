@@ -379,6 +379,9 @@ agent 用 `execute_shell_command` 直接调。目前只有 `ips`（Rust/musl sta
   抽取类任务一律用 `extract_document_fields`（全文只落在任务目录的文本文件里，不进上下文）。
 - 管道可用但受白名单约束：`DenyListCommandValidator` 按 `; | & 换行` 逐段判首个可执行文件，所以
   `ips seal src/x.jpg | head -c 500` 会因为 `head` 不在 `AGENT_SHELL_ALLOWED` 里被拒。直接读 JSON 输出最省事。
+- `idcard-recognition` 的正文是一条固定模板 `ips idcard src/x.jpg | python3 -c "..."`（第二段解开 `ocr_text`
+  那层 JSON 字符串，模型只填路径、不粘数据），所以 `AGENT_SHELL_ALLOWED` 要含 `python3`；只写 `ips` 时
+  技能正文自带退化跑法——去掉管道裸跑 `ips`，直接读 `ocr_text`。
 - CLI 虽然支持 URL，但工具层已经去远程化（§11）：指令里的 URL 会被改写成 `src/...`，因此也只给 CLI 传本地路径。
 
 **接线**
