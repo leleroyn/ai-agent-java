@@ -161,8 +161,25 @@ public class VisionClient {
     /**
      * 读本地图片文件成 data URL。<b>调用方必须已确保路径在任务沙箱内</b>（沙箱校验属于工具层）。
      * 成功返回 {@code data:...}，失败返回以 {@code "Error: "} 开头的说明。
+     *
+     * <p><b>先 stat 再读</b>：下载通道的上限（{@code agent.pdfs.max-download-bytes}，200MB）远大于
+     * 图片上限（{@code agent.vision.max-image-bytes}，默认 8MiB），中间这段区间的「图片」若直接
+     * {@code readAllBytes} 会先把整个文件吃进堆——一次调用最多 max-images 张，异步通道再乘并发数，
+     * 那是 OOM 面。所以字节数判定必须在分配 byte[] 之前完成，判过了才允许读。
      */
     public String dataUrlFromLocalFile(Path file) {
+        AgentProperties.Vision v = props.getVision();
+        long size;
+        try {
+            size = Files.size(file);
+        } catch (Exception e) {
+            return "Error: 读取本地图片失败：" + e.getClass().getSimpleName() + ": "
+                    + e.getMessage() + "（" + file + "）";
+        }
+        if (size > v.getMaxImageBytes()) {
+            return "Error: 图片过大（" + size + " 字节），超过上限 " + v.getMaxImageBytes()
+                    + " 字节：" + file;
+        }
         byte[] bytes;
         try {
             bytes = Files.readAllBytes(file);
@@ -170,7 +187,7 @@ public class VisionClient {
             return "Error: 读取本地图片失败：" + e.getClass().getSimpleName() + ": "
                     + e.getMessage() + "（" + file + "）";
         }
-        ImageData d = dataUrlFromBytes(bytes, "", file.toString(), props.getVision());
+        ImageData d = dataUrlFromBytes(bytes, "", file.toString(), v);
         return d.error != null ? d.error : d.dataUrl;
     }
 
